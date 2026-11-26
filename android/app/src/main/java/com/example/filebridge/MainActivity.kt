@@ -1,6 +1,7 @@
 package com.example.filebridge
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -68,14 +69,19 @@ private fun queryName(ctx: Context, uri: Uri): String {
 private fun joinPath(parent: String, name: String) =
     listOf(parent, name).filter { it.isNotEmpty() }.joinToString("/")
 
+private const val GH_OWNER = "zjh1934"
+private const val GH_REPO = "filebridge-android"
+private const val GH_ROOT = "sandbox-files"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App() {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("filebridge", Context.MODE_PRIVATE) }
-    var mode by remember { mutableStateOf(prefs.getString("mode", "local") ?: "local") }
-    var base by remember { mutableStateOf(prefs.getString("base", "") ?: "") }
+    // 默认就是「沙盒文件」，不是手机本地文件
+    var mode by remember { mutableStateOf(prefs.getString("mode", "sandbox") ?: "sandbox") }
     var token by remember { mutableStateOf(prefs.getString("token", "") ?: "") }
+    var base by remember { mutableStateOf(prefs.getString("base", "") ?: "") }
     var showCfg by remember { mutableStateOf(false) }
     var modeDialog by remember { mutableStateOf(false) }
     var parent by remember { mutableStateOf("") }
@@ -100,9 +106,9 @@ fun App() {
     var pending by remember { mutableStateOf<Pair<String, FileItem?>>("import" to null) }
 
     val local = remember { LocalStore(ctx) }
+    val gh = remember(token) { GitHubStore(ctx, GH_OWNER, GH_REPO, token, GH_ROOT) }
     val repo = remember(base, token) {
-        val url = base.ifBlank { "http://127.0.0.1:8765" }
-        FileRepository(ctx, ApiClient.create(url), token)
+        FileRepository(ctx, ApiClient.create(base.ifBlank { "http://127.0.0.1:8765" }), token)
     }
     val scope = rememberCoroutineScope()
 
@@ -111,29 +117,123 @@ fun App() {
         DevLog.e("UI", msg)
     }
 
+    // ---------- 三种后端统一分派 ----------
+    suspend fun doList(p: String): ListResp = when (mode) {
+        "sandbox" -> gh.list(p)
+        "local" -> local.list(p)
+        else -> if (base.isBlank()) ListResp(parent = p) else repo.list(p)
+    }
+
+    suspend fun doRead(f: FileItem): String = when (mode) {
+        "sandbox" -> gh.readText(f.rel)
+        "local" -> local.readText(f.rel)
+        else -> repo.readText(f)
+    }
+
+    suspend fun doSave(f: FileItem, text: String) = when (mode) {
+        "sandbox" -> gh.saveText(f.rel, text)
+        "local" -> local.saveText(f.rel, text)
+        else -> repo.saveText(f, text)
+    }
+
+    suspend fun doMkdir(name: String, p: String) = when (mode) {
+        "sandbox" -> gh.mkdir(name, p)
+        "local" -> local.mkdir(name, p)
+        else -> repo.mkdir(name, p)
+    }
+
+    suspend fun doCreate(name: String, p: String) = when (mode) {
+        "sandbox" -> gh.createText(name, p, "")
+        "local" -> local.createText(name, p, "")
+        else -> error("云网关模式请用「上传」新建文件")
+    }
+
+    suspend fun doRename(f: FileItem, name: String) = when (mode) {
+        "sandbox" -> gh.rename(f.rel, name)
+        "local" -> local.rename(f.rel, name)
+        else -> repo.rename(f.id, name)
+    }
+
+    suspend fun doDelete(f: FileItem) = when (mode) {
+        "sandbox" -> gh.delete(f.rel)
+        "local" -> local.delete(f.rel)
+        else -> repo.delete(f.id)
+    }
+
+    suspend fun doTrash(): List<TrashItem> = when (mode) {
+        "sandbox" -> gh.trash()
+        "local" -> local.trash()
+        else -> repo.trash()
+    }
+
+    suspend fun doRestore(id: String) = when (mode) {
+        "sandbox" -> gh.restore(id)
+        "local" -> local.restore(id)
+        else -> repo.restore(id)
+    }
+
+    suspend fun doPurge(id: String) = when (mode) {
+        "sandbox" -> gh.purge(id)
+        "local" -> local.purge(id)
+        else -> repo.purgeTrash(id)
+    }
+
+    suspend fun doLocalFile(f: FileItem): File = when (mode) {
+        "sandbox" -> gh.localFile(f.rel)
+        "local" -> local.fileOfRel(f.rel)
+        else -> repo.localFile(f)
+    }
+
+    suspend fun doImport(uri: Uri, name: String, action: String, item: FileItem?) {
+        when (mode) {
+            "sandbox" -> {
+                if (action == "overwrite" && item != null) {
+                    val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("读不到所选文件")
+                    gh.put(item.rel, bytes, "FileBridge: 覆盖 ${item.name}")
+                } else gh.importFrom(uri, name, parent)
+            }
+            "local" -> {
+                if (action == "overwrite" && item != null) {
+                    val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("读不到所选文件")
+                    local.saveText(item.rel, String(bytes, Charsets.UTF_8))
+                } else local.importFrom(uri, name, parent)
+            }
+            else -> {
+                if (action == "overwrite" && item != null) repo.overwrite(uri, item)
+                else repo.upload(uri, name, parent)
+            }
+        }
+    }
+
+    fun viewOf(f: File, mime: String): Intent = local.viewIntent(f, mime)
+    fun shareOf(f: File): Intent = local.shareIntent(f)
+
     suspend fun refresh() {
         try {
             busy = true
-            if (mode == "local") {
-                val r = local.list(parent)
-                dirs = r.dirs
-                files = r.files
-            } else {
-                if (base.isBlank()) {
-                    dirs = emptyList()
-                    files = emptyList()
-                    error = "还没填网关地址。点「设置」填，或切回「本机文件」直接用。"
-                    busy = false
-                    return
-                }
-                val r = repo.list(parent)
-                dirs = r.dirs
-                files = r.files
+            if (mode == "sandbox" && token.isBlank()) {
+                dirs = emptyList()
+                files = emptyList()
+                error = "点顶栏「设置」把令牌粘一次，就能看到沙盒里的文件了。粘一次以后都不用再管。"
+                busy = false
+                return
             }
-            if (error.isNotEmpty() && !error.startsWith("还没填")) error = ""
+            if (mode == "gateway" && base.isBlank()) {
+                dirs = emptyList()
+                files = emptyList()
+                error = "还没填网关地址。不会配就点顶栏「模式」切回「沙盒文件」。"
+                busy = false
+                return
+            }
+            val r = doList(parent)
+            dirs = r.dirs
+            files = r.files
+            error = ""
             DevLog.i("LIST", "[$mode] /$parent · ${dirs.size} 目录 · ${files.size} 文件")
         } catch (e: Exception) {
-            reportError("刷新失败：${e.message}")
+            reportError("加载失败：${e.message}")
         } finally {
             busy = false
         }
@@ -141,7 +241,7 @@ fun App() {
 
     LaunchedEffect(Unit) {
         DevLog.init(ctx)
-        DevLog.i("APP", "MainActivity 创建 · 默认模式=$mode · 零配置本机文件已就绪")
+        DevLog.i("APP", "MainActivity 创建 · 默认模式=$mode · 目标：查看/编辑沙盒文件")
     }
     DisposableEffect(Unit) {
         onDispose { DevLog.i("APP", "界面销毁 / 退到后台") }
@@ -159,18 +259,7 @@ fun App() {
                 val name = queryName(ctx, uri)
                 val (action, item) = pending
                 DevLog.i("UI", "选择 $name · 动作=$action · 模式=$mode")
-                if (mode == "local") {
-                    if (action == "overwrite" && item != null) {
-                        val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                            ?: error("读不到所选文件")
-                        local.saveText(item.rel, String(bytes, Charsets.UTF_8))
-                    } else {
-                        local.importFrom(uri, name, parent)
-                    }
-                } else {
-                    if (action == "overwrite" && item != null) repo.overwrite(uri, item)
-                    else repo.upload(uri, name, parent)
-                }
+                doImport(uri, name, action, item)
                 refresh()
             } catch (e: Exception) {
                 reportError("导入失败：${e.message}")
@@ -209,7 +298,15 @@ fun App() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (mode == "local") "FileBridge · 本机 /$parent" else "FileBridge · 网关 /$parent") },
+                title = {
+                    Text(
+                        text = when (mode) {
+                            "sandbox" -> "FileBridge · 沙盒 /$parent"
+                            "local" -> "FileBridge · 本机 /$parent"
+                            else -> "FileBridge · 网关 /$parent"
+                        }
+                    )
+                },
                 actions = {
                     TextButton(onClick = {
                         logSummary = DevLog.summary()
@@ -225,72 +322,77 @@ fun App() {
         Column(modifier = Modifier.padding(pad).padding(12.dp)) {
             if (showCfg) {
                 Text(
-                    text = if (mode == "local")
-                        "本机模式不需要任何地址、IP、路由器或 Token，下面只给「云网关」备用。"
-                    else
-                        "云网关是可选高级功能：需要一台常开电脑/云主机跑 server/。不会配就切回「本机文件」。",
+                    text = "连接的是仓库 $GH_OWNER/$GH_REPO 里的 $GH_ROOT/ 目录，里面就是沙盒的文件。" +
+                        "地址已经替你填好了，你只需要把令牌粘在下面，粘一次即可。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
-                    value = base,
-                    onValueChange = { base = it },
-                    label = { Text("网关地址（可留空）") },
+                    value = token,
+                    onValueChange = { token = it },
+                    label = { Text("把令牌粘这里（只粘一次）") },
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
-                    label = { Text("API Token（可留空）") },
-                    visualTransformation = PasswordVisualTransformation(),
+                    value = base,
+                    onValueChange = { base = it },
+                    label = { Text("云网关地址（高级，可留空）") },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Button(
                     onClick = {
-                        prefs.edit().putString("base", base).putString("token", token).apply()
+                        prefs.edit().putString("token", token).putString("base", base).apply()
                         showCfg = false
-                        DevLog.i("CFG", "保存配置 · 网关=${DevLog.sanitize(base)} · Token=[REDACTED]")
+                        DevLog.i("CFG", "保存配置 · Token=[REDACTED] · 网关=${DevLog.sanitize(base)}")
                         scope.launch { refresh() }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("保存") }
+                ) { Text("保存，然后就能看到沙盒文件") }
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { up() }, modifier = Modifier.weight(1f)) { Text("↑ 上级") }
                 Button(onClick = { pick("import") }, modifier = Modifier.weight(1f)) {
-                    Text(text = if (mode == "local") "导入文件" else "上传")
+                    Text(text = if (mode == "sandbox") "导入到沙盒" else "导入文件")
                 }
             }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (mode == "local") {
+                if (mode != "gateway") {
                     Button(onClick = { newFileOpen = true }, modifier = Modifier.weight(1f)) { Text("新建文件") }
                 }
                 Button(onClick = { newDirOpen = true }, modifier = Modifier.weight(1f)) { Text("新建目录") }
-                Button(onClick = {
-                    scope.launch {
-                        try {
-                            trashItems = if (mode == "local") local.trash() else repo.trash()
-                            trashOpen = true
-                        } catch (e: Exception) {
-                            reportError("回收站读取失败：${e.message}")
+                Button(
+                    onClick = {
+                        scope.launch {
+                            try {
+                                trashItems = doTrash()
+                                trashOpen = true
+                            } catch (e: Exception) {
+                                reportError("回收站读取失败：${e.message}")
+                            }
                         }
-                    }
-                }, modifier = Modifier.weight(1f)) { Text("回收站") }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) { Text("回收站") }
             }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    logSummary = DevLog.summary()
-                    devlogOpen = true
-                }, modifier = Modifier.fillMaxWidth()) { Text("导出开发者日志") }
+                Button(
+                    onClick = {
+                        logSummary = DevLog.summary()
+                        devlogOpen = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("导出开发者日志") }
             }
 
             Text(
-                text = if (mode == "local")
-                    "打开即用 · 文件存在手机里 · 不需要网络、路由器或电脑"
-                else
-                    "云网关模式 · 连不上就切回「本机文件」",
+                text = when (mode) {
+                    "sandbox" -> "沙盒文件 · 走 GitHub 仓库中转，不用电脑、路由器或 IP"
+                    "local" -> "本机文件 · 手机本地（备用）"
+                    else -> "云网关 · 需要常开服务器（高级）"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(vertical = 6.dp),
             )
@@ -302,10 +404,12 @@ fun App() {
 
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(dirs) { d ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable {
-                        parent = joinPath(parent, d.name)
-                        DevLog.i("NAV", "进入 /$parent")
-                    }) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable {
+                            parent = joinPath(parent, d.name)
+                            DevLog.i("NAV", "进入 /$parent")
+                        },
+                    ) {
                         Text(text = "📁  ${d.name}", modifier = Modifier.padding(14.dp))
                     }
                 }
@@ -318,11 +422,7 @@ fun App() {
                                 TextButton(onClick = {
                                     scope.launch {
                                         try {
-                                            if (mode == "local") {
-                                                ctx.startActivity(local.viewIntent(local.fileOfRel(f.rel), f.mime))
-                                            } else {
-                                                ctx.startActivity(repo.viewIntent(repo.localFile(f), f.mime))
-                                            }
+                                            ctx.startActivity(viewOf(doLocalFile(f), f.mime))
                                         } catch (e: Exception) {
                                             reportError("打开失败：${e.message}")
                                         }
@@ -331,7 +431,7 @@ fun App() {
                                 TextButton(onClick = {
                                     scope.launch {
                                         try {
-                                            editText = if (mode == "local") local.readText(f.rel) else repo.readText(f)
+                                            editText = doRead(f)
                                             editItem = f
                                         } catch (e: Exception) {
                                             reportError("读取失败：${e.message}")
@@ -342,11 +442,7 @@ fun App() {
                                 TextButton(onClick = {
                                     scope.launch {
                                         try {
-                                            if (mode == "local") {
-                                                ctx.startActivity(local.shareIntent(local.fileOfRel(f.rel)))
-                                            } else {
-                                                ctx.startActivity(local.shareIntent(repo.localFile(f)))
-                                            }
+                                            ctx.startActivity(shareOf(doLocalFile(f)))
                                         } catch (e: Exception) {
                                             reportError("分享失败：${e.message}")
                                         }
@@ -366,30 +462,46 @@ fun App() {
     if (modeDialog) {
         AlertDialog(
             onDismissRequest = { modeDialog = false },
-            title = { Text("选择模式") },
+            title = { Text("看哪种文件？") },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text("· 本机文件（推荐）：打开就能用，不需要网络、路由器、电脑，文件存在手机里。")
+                    Text("· 沙盒文件（默认，你要的）：查看和编辑沙盒里的文件，通过 GitHub 仓库中转。")
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("· 云网关：可选高级功能，需要一台常开的电脑或云主机跑服务端。不会配就别选。")
+                    Text("· 本机文件：手机本地文件，备用。")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("· 云网关：需要常开电脑/服务器，高级。")
                 }
             },
             confirmButton = {
                 Column {
-                    Button(onClick = {
-                        mode = "local"
-                        prefs.edit().putString("mode", "local").apply()
-                        parent = ""
-                        modeDialog = false
-                        DevLog.i("CFG", "切换到本机文件模式")
-                    }, modifier = Modifier.fillMaxWidth()) { Text("本机文件（推荐）") }
-                    Button(onClick = {
-                        mode = "gateway"
-                        prefs.edit().putString("mode", "gateway").apply()
-                        parent = ""
-                        modeDialog = false
-                        DevLog.i("CFG", "切换到云网关模式")
-                    }, modifier = Modifier.fillMaxWidth()) { Text("云网关（高级）") }
+                    Button(
+                        onClick = {
+                            mode = "sandbox"
+                            prefs.edit().putString("mode", "sandbox").apply()
+                            parent = ""
+                            modeDialog = false
+                            DevLog.i("CFG", "切换到沙盒文件模式")
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("沙盒文件（推荐）") }
+                    Button(
+                        onClick = {
+                            mode = "local"
+                            prefs.edit().putString("mode", "local").apply()
+                            parent = ""
+                            modeDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("本机文件（备用）") }
+                    Button(
+                        onClick = {
+                            mode = "gateway"
+                            prefs.edit().putString("mode", "gateway").apply()
+                            parent = ""
+                            modeDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("云网关（高级）") }
                     TextButton(onClick = { modeDialog = false }) { Text("取消") }
                 }
             },
@@ -404,7 +516,7 @@ fun App() {
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState()).heightIn(max = 340.dp)) {
                     Text(
-                        text = "记录运行详细状态：生命周期、目录切换、每个接口的耗时与状态码、文件操作、异常堆栈、设备信息。导出内容自动打码 Token 与签名参数。",
+                        text = "记录运行详细状态：生命周期、目录切换、每次 GitHub 请求的状态码与耗时、文件读写、异常堆栈、设备信息。导出内容自动打码令牌与签名参数。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -481,15 +593,14 @@ fun App() {
                 TextButton(onClick = {
                     scope.launch {
                         try {
-                            if (mode == "local") local.saveText(target.rel, editText)
-                            else repo.saveText(target, editText)
+                            doSave(target, editText)
                             editItem = null
                             refresh()
                         } catch (e: Exception) {
                             reportError("保存失败：${e.message}")
                         }
                     }
-                }) { Text("保存") }
+                }) { Text("保存到沙盒") }
             },
             dismissButton = { TextButton(onClick = { editItem = null }) { Text("取消") } },
         )
@@ -505,7 +616,7 @@ fun App() {
                 TextButton(onClick = {
                     scope.launch {
                         try {
-                            if (mode == "local") local.delete(target.rel) else repo.delete(target.id)
+                            doDelete(target)
                             confirmDel = null
                             refresh()
                         } catch (e: Exception) {
@@ -523,15 +634,12 @@ fun App() {
         AlertDialog(
             onDismissRequest = { renameItem = null },
             title = { Text("重命名") },
-            text = {
-                OutlinedTextField(value = renameText, onValueChange = { renameText = it })
-            },
+            text = { OutlinedTextField(value = renameText, onValueChange = { renameText = it }) },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
                         try {
-                            if (mode == "local") local.rename(target.rel, renameText)
-                            else repo.rename(target.id, renameText)
+                            doRename(target, renameText)
                             renameItem = null
                             refresh()
                         } catch (e: Exception) {
@@ -544,11 +652,11 @@ fun App() {
         )
     }
 
-    // ---------------- 新建文件 / 目录 ----------------
+    // ---------------- 新建 ----------------
     if (newFileOpen) {
         AlertDialog(
             onDismissRequest = { newFileOpen = false },
-            title = { Text("新建文本文件") },
+            title = { Text("新建沙盒文件") },
             text = {
                 OutlinedTextField(
                     value = newFileName,
@@ -560,7 +668,7 @@ fun App() {
                 TextButton(onClick = {
                     scope.launch {
                         try {
-                            local.createText(newFileName, parent, "")
+                            doCreate(newFileName, parent)
                             newFileOpen = false
                             newFileName = ""
                             refresh()
@@ -578,15 +686,12 @@ fun App() {
         AlertDialog(
             onDismissRequest = { newDirOpen = false },
             title = { Text("新建目录") },
-            text = {
-                OutlinedTextField(value = newDirName, onValueChange = { newDirName = it })
-            },
+            text = { OutlinedTextField(value = newDirName, onValueChange = { newDirName = it }) },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
                         try {
-                            if (mode == "local") local.mkdir(newDirName, parent)
-                            else repo.mkdir(newDirName, parent)
+                            doMkdir(newDirName, parent)
                             newDirOpen = false
                             newDirName = ""
                             refresh()
@@ -614,8 +719,8 @@ fun App() {
                             TextButton(onClick = {
                                 scope.launch {
                                     try {
-                                        if (mode == "local") local.restore(t.id) else repo.restore(t.id)
-                                        trashItems = if (mode == "local") local.trash() else repo.trash()
+                                        doRestore(t.id)
+                                        trashItems = doTrash()
                                         refresh()
                                     } catch (e: Exception) {
                                         reportError("恢复失败：${e.message}")
@@ -625,8 +730,8 @@ fun App() {
                             TextButton(onClick = {
                                 scope.launch {
                                     try {
-                                        if (mode == "local") local.purge(t.id) else repo.purgeTrash(t.id)
-                                        trashItems = if (mode == "local") local.trash() else repo.trash()
+                                        doPurge(t.id)
+                                        trashItems = doTrash()
                                     } catch (e: Exception) {
                                         reportError("删除失败：${e.message}")
                                     }

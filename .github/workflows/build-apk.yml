@@ -3,6 +3,9 @@ name: Build APK & Release
 on:
   push:
     branches: [main]
+    # 沙盒文件中转目录的 commit 不触发重新打包（同步脚本也带 [skip ci]）
+    paths-ignore:
+      - 'sandbox-files/**'
   workflow_dispatch:
 
 permissions:
@@ -15,9 +18,9 @@ concurrency:
 
 env:
   # ---- 版本规则：每出一个包只改这里，APK 名 / tag / 标题全部跟着走 ----
-  APP_VERSION: "1.1"
-  APK_NAME: "FileBridge-v1.1.apk"
-  RELEASE_TAG: "v1.1"
+  APP_VERSION: "1.2"
+  APK_NAME: "FileBridge-v1.2.apk"
+  RELEASE_TAG: "v1.2"
 
 jobs:
   build:

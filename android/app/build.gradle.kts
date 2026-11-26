@@ -12,8 +12,8 @@ android {
         minSdk = 26
         targetSdk = 34
         // 版本规则：从 v1.1 起，每出一个包 versionName +0.1、versionCode +1
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     signingConfigs {
