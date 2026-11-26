@@ -1,7 +1,11 @@
-# 本地凭据（绝不入库）
+# 本地凭据（绝不入库；CI 用的证书存在 Actions Secret 里）
 .gh/
 *.token
 local.properties
+*.jks
+*.keystore
+*.pk8
+*.p12
 
 # Android / Gradle
 *.iml

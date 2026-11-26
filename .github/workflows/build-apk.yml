@@ -1,4 +1,4 @@
-name: Build Debug APK & Release
+name: Build APK & Release
 
 on:
   push:
@@ -10,8 +10,14 @@ permissions:
   actions: read
 
 concurrency:
-  group: debug-apk-release
+  group: apk-release
   cancel-in-progress: true
+
+env:
+  # ---- 版本规则：每出一个包只改这里，APK 名 / tag / 标题全部跟着走 ----
+  APP_VERSION: "1.1"
+  APK_NAME: "FileBridge-v1.1.apk"
+  RELEASE_TAG: "v1.1"
 
 jobs:
   build:
@@ -34,10 +40,8 @@ jobs:
       - name: Diagnose preinstalled Android SDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
           ls -la "${ANDROID_HOME:-/usr/local/lib/android/sdk}" 2>/dev/null | head -n 20 || true
           which sdkmanager || true
-          sdkmanager --version 2>&1 | head -n 5 || true
 
       - name: Install SDK packages
         run: |
@@ -61,17 +65,34 @@ jobs:
           fi
           yes | "$SDKM" --licenses > /dev/null || true
           "$SDKM" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
-          "$SDKM" --version
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
+      - name: Restore fixed signing certificate
+        # 证书存在 Actions Secret 里，不进公开仓库；每个版本都用同一张，可直接覆盖安装
+        run: |
+          set -e
+          echo "${{ secrets.FILEBRIDGE_KEYSTORE_B64 }}" | base64 -d > app/filebridge.jks
+          ls -l app/filebridge.jks
+          keytool -list -v -keystore app/filebridge.jks \
+            -storepass filebridge2026 -alias filebridge 2>/dev/null \
+            | grep -E "Owner:|SHA256:" | head -n 4
+
+      - name: Build signed release APK
         run: |
           set -o pipefail
-          gradle :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee gradle-build.log
+          gradle :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee gradle-build.log
+
+      - name: Verify signature is fixed & valid
+        run: |
+          set -e
+          APKSIGNER="${ANDROID_HOME}/build-tools/34.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs \
+            app/build/outputs/apk/release/app-release.apk | head -n 20
+          sha256sum app/build/outputs/apk/release/app-release.apk
 
       - name: Upload build log
         if: always()
@@ -96,29 +117,31 @@ jobs:
           git commit -m "ci: build log for run ${GITHUB_RUN_ID}" || true
           git push --force origin ci-logs
 
-      - name: Prepare artifact
+      - name: Prepare artifact with fixed name
         run: |
-          ls -lh app/build/outputs/apk/debug/
-          cp app/build/outputs/apk/debug/app-debug.apk FileBridge-debug.apk
-          sha256sum FileBridge-debug.apk
+          set -e
+          ls -lh app/build/outputs/apk/release/
+          cp app/build/outputs/apk/release/app-release.apk "${APK_NAME}"
+          echo "APK=${APK_NAME}"
+          sha256sum "${APK_NAME}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FileBridge-debug-apk
-          path: android/FileBridge-debug.apk
+          name: FileBridge-release-apk
+          path: android/${{ env.APK_NAME }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 60
 
-      - name: Publish debug Release
+      - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0-debug
-          name: "FileBridge v0.1.0 · Debug 安装包"
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "FileBridge v${{ env.APP_VERSION }}"
           body_path: .github/RELEASE_BODY.md
-          files: android/FileBridge-debug.apk
+          files: android/${{ env.APK_NAME }}
           draft: false
-          prerelease: true
+          prerelease: false
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

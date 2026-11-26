@@ -11,8 +11,36 @@ android {
         applicationId = "com.example.filebridge"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        // 版本规则：从 v1.1 起，每出一个包 versionName +0.1、versionCode +1
+        versionCode = 2
+        versionName = "1.1"
+    }
+
+    signingConfigs {
+        create("fixed") {
+            // 证书本体不进公开仓库：CI 从 Actions Secret 解码到 app/filebridge.jks
+            // 密码/别名固定，保密的是 jks 文件本身
+            val jks = file("filebridge.jks")
+            if (jks.exists()) {
+                storeFile = jks
+                storePassword = "filebridge2026"
+                keyAlias = "filebridge"
+                keyPassword = "filebridge2026"
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
+            // 有 jks 就用固定证书签名；本地没有时仍可构建（未签名）
+            if (file("filebridge.jks").exists()) {
+                signingConfig = signingConfigs.getByName("fixed")
+            }
+        }
     }
 
     buildFeatures { compose = true }
