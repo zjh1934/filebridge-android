@@ -82,6 +82,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Publish build log for debugging
+        if: failure()
+        run: |
+          set -e
+          git config user.email "ci@filebridge.local"
+          git config user.name "FileBridge CI"
+          git checkout -B ci-logs
+          mkdir -p ci
+          if [ -f gradle-build.log ]; then cp gradle-build.log ci/last-build.log;
+          else echo "build log missing" > ci/last-build.log; fi
+          git add -f ci/last-build.log
+          git commit -m "ci: build log for run ${GITHUB_RUN_ID}" || true
+          git push --force origin ci-logs
+
       - name: Prepare artifact
         run: |
           ls -lh app/build/outputs/apk/debug/
