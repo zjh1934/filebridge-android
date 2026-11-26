@@ -26,7 +26,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.DisposableEffect
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -36,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -224,24 +224,33 @@ fun App() {
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(Modifier.weight(1f), onClick = {
-                    parent = parent.split("/").filter { it.isNotEmpty() }.dropLast(1).joinToString("/")
-                    DevLog.i("NAV", "返回上级 -> /$parent")
-                }) { Text("↑ 上级") }
-                Button(Modifier.weight(1f), onClick = { pick("upload") }) { Text("上传") }
+                Button(
+                    onClick = {
+                        parent = parent.split("/").filter { it.isNotEmpty() }.dropLast(1).joinToString("/")
+                        DevLog.i("NAV", "返回上级 -> /$parent")
+                    },
+                    modifier = Modifier.weight(1f),
+                ) { Text("↑ 上级") }
+                Button(onClick = { pick("upload") }, modifier = Modifier.weight(1f)) { Text("上传") }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(Modifier.weight(1f), onClick = { newDirOpen = true }) { Text("新建目录") }
-                Button(Modifier.weight(1f), onClick = {
-                    scope.launch {
-                        try { trashItems = repo.trash(); trashOpen = true }
-                        catch (e: Exception) { reportError("回收站读取失败：${e.message}") }
-                    }
-                }) { Text("回收站") }
-                Button(Modifier.weight(1f), onClick = {
-                    logSummary = repo.devLogSummary()
-                    devlogOpen = true
-                }) { Text("导出日志") }
+                Button(onClick = { newDirOpen = true }, modifier = Modifier.weight(1f)) { Text("新建目录") }
+                Button(
+                    onClick = {
+                        scope.launch {
+                            try { trashItems = repo.trash(); trashOpen = true }
+                            catch (e: Exception) { reportError("回收站读取失败：${e.message}") }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) { Text("回收站") }
+                Button(
+                    onClick = {
+                        logSummary = repo.devLogSummary()
+                        devlogOpen = true
+                    },
+                    modifier = Modifier.weight(1f),
+                ) { Text("导出日志") }
             }
 
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 6.dp))
