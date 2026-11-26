@@ -162,7 +162,7 @@ def t_workflow():
         parsed = "PyYAML 解析通过"
     except ImportError:
         parsed = "PyYAML 未安装，改为关键字校验"
-        for kw in ["actions/checkout@v4", "setup-java@v4", "setup-android@v3",
+        for kw in ["actions/checkout@v4", "setup-java@v4", "Diagnose preinstalled Android SDK",
                    "gradle/actions/setup-gradle@v4", "assembleDebug",
                    "softprops/action-gh-release@v2", "tag_name: v0.1.0-debug"]:
             assert kw in s, f"workflow 缺少 {kw}"
