@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FileBridge · 文件控制台</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e6e8eb; --pri:#2f6feb; --danger:#e5484d; --muted:#8a9099; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:#1c2026; font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; padding-bottom:60px; }
+  header { background:var(--pri); color:#fff; padding:16px 16px 14px; }
+  header h1 { margin:0 0 10px; font-size:18px; font-weight:600; }
+  .cfg { display:flex; gap:8px; flex-wrap:wrap; }
+  .cfg input { flex:1 1 140px; min-width:0; border:0; border-radius:8px; padding:9px 10px; font-size:13px; }
+  .cfg button { border:0; border-radius:8px; padding:9px 14px; background:#fff; color:var(--pri); font-weight:600; }
+  .bar { display:flex; gap:8px; align-items:center; padding:12px 16px 8px; flex-wrap:wrap; }
+  .bar .path { flex:1 1 100%; color:var(--muted); font-size:12px; word-break:break-all; }
+  button.act { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:8px 12px; font-size:13px; }
+  button.act:active { background:#eef2fb; }
+  .list { padding:0 12px; }
+  .row { display:flex; align-items:center; gap:10px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:8px; }
+  .ico { width:34px; height:34px; border-radius:8px; background:#eef2fb; display:grid; place-items:center; flex:none; font-size:16px; }
+  .row.dir .ico { background:#fff3dd; }
+  .info { flex:1; min-width:0; }
+  .info b { display:block; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .info small { color:var(--muted); font-size:11px; }
+  .ops { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+  .ops button { border:0; background:#f1f3f6; border-radius:6px; padding:6px 9px; font-size:12px; color:#333; }
+  .ops button.red { color:var(--danger); }
+  .empty { text-align:center; color:var(--muted); padding:40px 0; }
+  .mask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:flex-end; z-index:9; }
+  .mask.on { display:flex; }
+  .sheet { background:#fff; width:100%; border-radius:16px 16px 0 0; padding:18px 16px 24px; max-height:86vh; overflow:auto; }
+  .sheet h3 { margin:0 0 12px; font-size:16px; }
+  .sheet textarea { width:100%; min-height:220px; border:1px solid var(--line); border-radius:8px; padding:10px; font:13px/1.5 monospace; }
+  .sheet input[type=text] { width:100%; border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .sheet .btns { display:flex; gap:8px; margin-top:12px; }
+  .sheet .btns button { flex:1; padding:11px; border:0; border-radius:8px; font-size:14px; }
+  .sheet .btns .ok { background:var(--pri); color:#fff; }
+  .sheet .btns .no { background:#f1f3f6; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#1c2026; color:#fff; padding:10px 16px; border-radius:20px; font-size:13px; opacity:0; transition:.25s; pointer-events:none; z-index:20; max-width:88vw; }
+  #toast.on { opacity:1; }
+  .trashrow { border-bottom:1px solid var(--line); padding:10px 0; display:flex; gap:8px; align-items:center; }
+  .trashrow span { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FileBridge · 文件控制台</h1>
+  <div class="cfg">
+    <input id="base" placeholder="服务地址，如 http://192.168.1.5:8765" value="">
+    <input id="token" placeholder="API Token" type="password">
+    <button onclick="connect()">连接</button>
+  </div>
+</header>
+
+<div class="bar">
+  <div class="path" id="crumb">当前目录：/ </div>
+  <button class="act" onclick="load()">刷新</button>
+  <button class="act" onclick="goUp()">↑ 上级</button>
+  <button class="act" onclick="document.getElementById('picker').click()">上传</button>
+  <button class="act" onclick="newDir()">新建目录</button>
+  <button class="act" onclick="openTrash()">回收站</button>
+  <button class="act" onclick="exportDevLog()">导出日志</button>
+  <input id="picker" type="file" multiple hidden onchange="doUpload(this.files)">
+</div>
+
+<div class="list" id="list"></div>
+
+<div class="mask" id="mask" onclick="if(event.target===this)closeSheet()">
+  <div class="sheet" id="sheet"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+/* ---------- 开发者日志：采集运行详细状态，一键导出 Markdown ---------- */
+const DEVLOG = [];
+const SESSION_START = Date.now();
+function scrub(s) {
+  return String(s)
+    .replace(/(sig=)[0-9a-f]{16,}/gi, '$1***')
+    .replace(/(token=)[^&\s"']+/gi, '$1***')
+    .replace(/(x-api-key["':= ]+)[^\s,&"']+/gi, '$1***')
+    .replace(/(Bearer )[A-Za-z0-9._-]+/gi, '$1***')
+    .replace(/gh[pousr]_[A-Za-z0-9]{16,}/g, '***');
+}
+function dl(level, tag, msg, extra) {
+  DEVLOG.push({ts: Date.now(), level, tag, msg: scrub(msg), extra: extra || null});
+  if (DEVLOG.length > 3000) DEVLOG.shift();
+}
+function mdEscape(s) { return String(s).replace(/\|/g, '\\|').replace(/\r/g,' ').replace(/\n/g,' ⏎ '); }
+function tsStr(t) { return new Date(t).toLocaleString('zh-CN', {hour12:false}); }
+window.addEventListener('error', e => dl('E','WINDOW', e.message + ' @ ' + (e.filename || '') + ':' + (e.lineno || '')));
+window.addEventListener('unhandledrejection', e => dl('E','PROMISE', String(e.reason)));
+dl('I','APP','Web 控制台启动 · UA=' + navigator.userAgent);
+
+const $ = id => document.getElementById(id);
+let cfg = {
+  base: localStorage.getItem('fb_base') || location.origin,
+  token: localStorage.getItem('fb_token') || ''
+};
+let cur = '';
+$('base').value = cfg.base;
+$('token').value = cfg.token;
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('on'), 2200);
+}
+function connect() {
+  cfg.base = $('base').value.trim().replace(/\/$/, '') || location.origin;
+  cfg.token = $('token').value.trim();
+  localStorage.setItem('fb_base', cfg.base);
+  localStorage.setItem('fb_token', cfg.token);
+  dl('I','CFG','保存连接配置 · 服务地址=' + scrub(cfg.base) + ' · Token=[REDACTED]');
+  load();
+}
+function api(path, opts = {}) {
+  const headers = Object.assign({'x-api-key': cfg.token}, opts.headers || {});
+  const method = (opts.method || 'GET').toUpperCase();
+  const t0 = performance.now();
+  dl('D','HTTP', '→ ' + method + ' ' + scrub(path));
+  return fetch(cfg.base + path, Object.assign({}, opts, {headers})).then(async r => {
+    const ms = Math.round(performance.now() - t0);
+    if (!r.ok) {
+      let t = ''; try { t = (await r.text()).slice(0, 180); } catch (e) {}
+      DEVLOG.push({ts:Date.now(), level:'E', tag:'HTTP',
+        msg: method + ' ' + scrub(path) + ' → ' + r.status + ' (' + ms + 'ms) · ' + scrub(t),
+        extra:{method, path:scrub(path), code:r.status, ms, error:t}});
+      const err = new Error(`${r.status} ${t}`);
+      err.__logged = true;
+      throw err;
+    }
+    DEVLOG.push({ts:Date.now(), level:'I', tag:'HTTP',
+      msg: method + ' ' + scrub(path) + ' → ' + r.status + ' (' + ms + 'ms)',
+      extra:{method, path:scrub(path), code:r.status, ms, error:null}});
+    const ct = r.headers.get('content-type') || '';
+    return ct.includes('application/json') ? r.json() : r;
+  }).catch(e => {
+    if (!e.__logged) dl('E','HTTP', method + ' ' + scrub(path) + ' 请求异常 · ' + e.message);
+    throw e;
+  });
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmt(n) { return n > 1048576 ? (n/1048576).toFixed(1)+' MB' : n > 1024 ? (n/1024).toFixed(1)+' KB' : n+' B'; }
+
+function exportDevLog() {
+  dl('I','LOG','导出开发者日志');
+  const http = DEVLOG.filter(x => x.extra);
+  const errs = DEVLOG.filter(x => x.level === 'E');
+  const avg = http.length ? Math.round(http.reduce((a,b) => a + (b.extra.ms||0), 0) / http.length) : 0;
+  const L = [];
+  L.push('# FileBridge Web 控制台 · 开发者日志', '');
+  L.push('> 由控制台「导出日志」一键生成，密钥与预签名参数已自动打码。', '');
+  L.push('## 1. 导出信息', '');
+  L.push('| 项 | 值 |', '| --- | --- |');
+  L.push('| 导出时间 | ' + tsStr(Date.now()) + ' |');
+  L.push('| 会话开始 | ' + tsStr(SESSION_START) + ' |');
+  L.push('| 浏览器 | `' + mdEscape(navigator.userAgent) + '` |');
+  L.push('| 服务地址 | `' + mdEscape(scrub(cfg.base)) + '` |');
+  L.push('| API Token | `[REDACTED]` |', '');
+  L.push('## 2. 运行摘要', '');
+  L.push('| 指标 | 数值 |', '| --- | --- |');
+  L.push('| 日志条数 | ' + DEVLOG.length + ' |');
+  L.push('| ERROR | ' + errs.length + ' |');
+  L.push('| WARN | ' + DEVLOG.filter(x => x.level === 'W').length + ' |');
+  L.push('| HTTP 请求 | ' + http.length + ' |');
+  L.push('| HTTP 失败 | ' + http.filter(x => x.extra.code < 200 || x.extra.code >= 300).length + ' |');
+  L.push('| 平均耗时 | ' + avg + ' ms |', '');
+  L.push('## 3. 完整时间线', '');
+  L.push('| 时间 | 级别 | 模块 | 内容 |', '| --- | --- | --- | --- |');
+  DEVLOG.forEach(x => L.push('| ' + tsStr(x.ts) + ' | ' + x.level + ' | ' + mdEscape(x.tag) + ' | ' + mdEscape(x.msg) + ' |'));
+  L.push('', '## 4. 网络请求明细', '');
+  L.push('| 方法 | 路径 | 状态 | 耗时 | 错误 |', '| --- | --- | --- | --- | --- |');
+  if (!http.length) L.push('| - | - | - | - | - |');
+  http.forEach(x => L.push('| ' + x.extra.method + ' | `' + mdEscape(x.extra.path) + '` | ' + x.extra.code + ' | ' + x.extra.ms + ' ms | ' + mdEscape(x.extra.error || '-') + ' |'));
+  L.push('', '## 5. 错误明细', '');
+  if (!errs.length) L.push('_(无错误)_');
+  errs.forEach((x, i) => L.push((i+1) + '. `' + tsStr(x.ts) + '` · ' + mdEscape(x.msg)));
+  L.push('', '---', '', '_FileBridge DevLog · 敏感信息已脱敏_');
+  const name = 'FileBridge_Web_DevLog_' + new Date().toISOString().replace(/[-:T]/g,'').slice(0,14) + '.md';
+  const blob = new Blob([L.join('\n')], {type:'text/markdown;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  toast('日志已导出：' + name);
+}
+function sheet(html) { $('sheet').innerHTML = html; $('mask').classList.add('on'); }
+function closeSheet() { $('mask').classList.remove('on'); }
+
+async function load() {
+  $('crumb').textContent = '当前目录：/' + cur;
+  try {
+    const j = await api('/files?parent=' + encodeURIComponent(cur));
+    dl('I','LIST','目录 /' + cur + ' · ' + j.dirs.length + ' 个子目录 · ' + j.files.length + ' 个文件');
+    let html = '';
+    for (const d of j.dirs) {
+      const p = [cur, d.name].filter(Boolean).join('/');
+      html += `<div class="row dir"><div class="ico">📁</div><div class="info"><b>${esc(d.name)}</b><small>目录</small></div>
+        <div class="ops"><button onclick="enter('${esc(p)}')">进入</button></div></div>`;
+    }
+    for (const f of j.files) {
+      html += `<div class="row"><div class="ico">📄</div><div class="info"><b>${esc(f.name)}</b><small>${fmt(f.size)} · ${esc(f.mime)}</small></div>
+        <div class="ops">
+          <button onclick="openFile('${f.id}')">打开</button>
+          <button onclick="download('${f.id}')">下载</button>
+          <button onclick="edit('${f.id}','${esc(f.name)}','${f.sha256}')">编辑</button>
+          <button onclick="rename('${f.id}','${esc(f.name)}')">改名</button>
+          <button class="red" onclick="del('${f.id}','${esc(f.name)}')">删除</button>
+        </div></div>`;
+    }
+    $('list').innerHTML = html || '<div class="empty">这里还是空的，上传个文件试试</div>';
+  } catch (e) { dl('E','UI','刷新失败 · ' + e.message); toast('连接失败：' + e.message); }
+}
+function enter(p) { cur = p; dl('I','NAV','进入目录 /' + p); load(); }
+function goUp() { cur = cur.split('/').filter(Boolean).slice(0, -1).join('/'); dl('I','NAV','返回上级 /' + cur); load(); }
+
+async function doUpload(files) {
+  for (const f of files) {
+    const fd = new FormData(); fd.append('file', f, f.name); fd.append('parent', cur);
+    try { await api('/files', {method:'POST', body:fd}); dl('I','FILE','上传 ' + f.name + ' 到 /' + cur); toast('已上传 ' + f.name); }
+    catch (e) { dl('E','FILE','上传失败 ' + f.name + ' · ' + e.message); toast('上传失败：' + e.message); }
+  }
+  $('picker').value = ''; load();
+}
+async function newDir() {
+  const name = prompt('目录名'); if (!name) return;
+  try { await api('/dirs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, parent:cur})}); load(); }
+  catch (e) { toast(e.message); }
+}
+async function openUrl(id) {
+  return (await api('/files/' + id + '/open')).url;
+}
+async function openFile(id) {
+  try { window.open(await openUrl(id), '_blank'); } catch (e) { toast(e.message); }
+}
+async function download(id) {
+  try { location.href = (await openUrl(id)) + '&download=1'; } catch (e) { toast(e.message); }
+}
+async function edit(id, name, sha) {
+  if (!/text|json|xml|javascript|yaml|markdown|csv|html|css|sql|sh|py|kt|java/.test(name)) {
+    if (!confirm('这不是明显的文本文件，仍要按纯文本编辑吗？')) return;
+  }
+  try {
+    const r = await api('/files/' + id + '/content');
+    const txt = await r.text();
+    sheet(`<h3>编辑 ${esc(name)}</h3><textarea id="et">${esc(txt)}</textarea>
+      <div class="btns"><button class="no" onclick="closeSheet()">取消</button><button class="ok" onclick="saveEdit('${id}','${esc(name)}','${sha}')">保存</button></div>`);
+  } catch (e) { toast(e.message); }
+}
+async function saveEdit(id, name, sha) {
+  const fd = new FormData();
+  fd.append('file', new Blob([$('et').value], {type:'text/plain'}), name);
+  try {
+    await api('/files/' + id, {method:'PUT', body:fd, headers:{'If-Match':sha}});
+    dl('I','FILE','保存编辑 ' + name + ' · ' + $('et').value.length + ' 字符');
+    closeSheet(); toast('已保存'); load();
+  } catch (e) { dl('E','FILE','保存失败 ' + name + ' · ' + e.message); toast('保存失败（可能版本冲突，请刷新）：' + e.message); }
+}
+async function rename(id, old) {
+  const name = prompt('新文件名', old); if (!name || name === old) return;
+  try { await api('/files/' + id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}); dl('I','FILE','改名 ' + old + ' → ' + name); load(); }
+  catch (e) { dl('E','FILE','改名失败 · ' + e.message); toast(e.message); }
+}
+async function del(id, name) {
+  if (!confirm('把「' + name + '」移入回收站？')) return;
+  try { await api('/files/' + id, {method:'DELETE'}); dl('I','FILE','软删除 ' + name + ' → 回收站'); toast('已移入回收站'); load(); }
+  catch (e) { dl('E','FILE','删除失败 · ' + e.message); toast(e.message); }
+}
+async function openTrash() {
+  try {
+    const items = await api('/trash');
+    let h = '<h3>回收站</h3>';
+    if (!items.length) h += '<div class="empty">回收站是空的</div>';
+    for (const x of items) {
+      h += `<div class="trashrow"><span>${esc(x.name)}<br><small style="color:#8a9099">${esc(x.rel)}</small></span>
+        <button onclick="restore('${x.id}')">恢复</button>
+        <button onclick="purge('${x.id}')">彻底删</button></div>`;
+    }
+    h += '<div class="btns"><button class="no" onclick="closeSheet()">关闭</button></div>';
+    sheet(h);
+  } catch (e) { toast(e.message); }
+}
+async function restore(id) {
+  try { await api('/trash/' + id + '/restore', {method:'POST'}); dl('I','TRASH','从回收站恢复 ' + id); closeSheet(); toast('已恢复'); load(); }
+  catch (e) { dl('E','TRASH','恢复失败 · ' + e.message); toast(e.message); }
+}
+async function purge(id) {
+  if (!confirm('彻底删除，不可恢复，确定？')) return;
+  try { await api('/trash/' + id, {method:'DELETE'}); dl('I','TRASH','彻底删除 ' + id); openTrash(); load(); }
+  catch (e) { dl('E','TRASH','彻底删除失败 · ' + e.message); toast(e.message); }
+}
+load();
+</script>
+</body>
+</html>
