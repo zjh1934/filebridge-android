@@ -62,8 +62,8 @@ def skip_rel(rel: str) -> bool:
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 60                                        # 每批 tree 条目数：树变大后 GitHub 会拒绝大批量
-UPLOAD_WORKERS = 2                                # 写操作太猛会撞 secondary rate limit
-BLOB_SPACING = 0.35                               # 全局最小间隔（秒），温和推进
+UPLOAD_WORKERS = 8                                # 配额充足、无限流迹象，8 路并行传大文件
+BLOB_SPACING = 0.05                               # 全局最小间隔（秒）；撞 secondary 限流时 api() 自动退避
 _BLOB_LOCK = threading.Lock()
 _last_blob = [0.0]
 BLOB_CACHE = Path(os.getenv("FB_BLOB_CACHE", "/data/workspace/.persistent_blob_cache.json"))
