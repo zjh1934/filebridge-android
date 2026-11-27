@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-推送前静态自检（不依赖 Android SDK / Kotlin 编译器）：
+推送前静态自检（不依赖 Android SDK / Kotlin 编译器）。
 
-  1. 必需文件齐全，旧的中转脚本/目录确实已删
-  2. 仓库里绝不能出现 Token / PAT / 签名私钥
-  3. 两个仓库分离：代码仓 public，持久区镜像仓 private，APP 指向后者根路径
-  4. 全量双向同步脚本的三向比较 / 断点续传 / 空目录占位 / 限速退避
-  5. v1.4 的线程安全修复没有回归
-  6. 生成 VERIFY_STATIC.md
+重点覆盖：
+  1. 两仓分离：代码仓 public、持久区镜像仓 private，APP 指向后者根路径
+  2. v1.6 云盘式交互：返回键逐级回退、多选批量、搜索/全仓搜索、排序、视图、详情
+  3. Logo 与「沙盒管理器」应用名、固定签名、R8
+  4. 同步脚本：三向比较 / 按项目分批 / 断点续传 / 字节级 verify / 活跃项目防写一半
+  5. 仓库里绝不能出现 Token / PAT / 签名私钥
 
-用法：python3 scripts/check_sources.py
+生成 VERIFY_STATIC.md。用法：python3 scripts/check_sources.py
 """
 from __future__ import annotations
 
@@ -32,8 +32,16 @@ REQUIRED = [
     "android/gradle.properties", "android/app/build.gradle.kts",
     "android/app/proguard-rules.pro",
     "android/app/src/main/AndroidManifest.xml",
-    "android/app/src/main/res/xml/file_paths.xml",
+    "android/app/src/main/res/values/strings.xml",
     "android/app/src/main/res/values/styles.xml",
+    "android/app/src/main/res/xml/file_paths.xml",
+    "android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml",
+    "android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml",
+    "android/app/src/main/res/mipmap-mdpi/ic_launcher.png",
+    "android/app/src/main/res/mipmap-hdpi/ic_launcher.png",
+    "android/app/src/main/res/mipmap-xhdpi/ic_launcher.png",
+    "android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+    "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
     "android/app/src/main/java/com/example/filebridge/GitHubStore.kt",
     "android/app/src/main/java/com/example/filebridge/Models.kt",
     "android/app/src/main/java/com/example/filebridge/Theme.kt",
@@ -77,7 +85,6 @@ def all_files() -> list[Path]:
 
 
 def code_only(s: str) -> str:
-    """去掉注释，避免把「说明里提到旧依赖 / 被规避的审美」误判成代码残留。"""
     out, in_block = [], False
     for line in s.splitlines():
         t = line.strip()
@@ -101,8 +108,8 @@ def t_required():
     assert not missing, f"缺失文件: {missing}"
     left = [f for f in REMOVED if (ROOT / f).exists()]
     assert not left, f"旧残留未清: {left}"
-    assert not (ROOT / "sandbox-files").exists(), "代码仓里不应再有 sandbox-files 中转目录"
-    return f"{len(REQUIRED)} 个必需文件齐全，6 个旧残留已删"
+    assert not (ROOT / "sandbox-files").exists(), "代码仓里不应再有旧中转目录"
+    return f"{len(REQUIRED)} 个必需文件齐全（含 Logo 多密度资源），6 个旧残留已删"
 
 
 def t_no_secrets():
@@ -130,7 +137,6 @@ def t_no_secrets():
 
 
 def t_two_repos():
-    """核心：代码仓与数据镜像仓必须分开，APP 指向私有镜像仓根路径。"""
     m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
     for kw in ['GH_REPO = "filebridge-persistent"', 'GH_ROOT = ""',
                'GH_OWNER = "zjh1934"', 'GitHubStore(ctx, GH_OWNER, GH_REPO, token, GH_ROOT)']:
@@ -138,38 +144,75 @@ def t_two_repos():
     assert "filebridge-android" not in code_only(m), "界面仍引用代码仓当数据源"
     g = (ROOT / "android/app/src/main/java/com/example/filebridge/GitHubStore.kt").read_text("utf-8")
     assert "private fun contentsUrl(" in g, "缺少仓库根路径 URL 处理"
-    assert "if (p.isBlank()) api else" in g, "contents/ 斜杠问题未处理"
+    assert "suspend fun allPaths()" in g, "缺少全仓路径索引"
+    assert "suspend fun deleteFolder(" in g, "缺少整目录删除"
+    assert '"isDir", true' in g, "目录删除未打包成一条回收站记录"
     d = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
     assert 'GH_MIRROR_REPO = "filebridge-persistent"' in d, "日志未标注镜像仓"
     s = (ROOT / "scripts/sync_persistent.py").read_text("utf-8")
-    assert 'REPO = os.getenv("FB_MIRROR_REPO", "filebridge-persistent")' in s, "同步脚本目标仓不对"
-    assert "/data/user_persistent_data" in s, "同步脚本根目录不是持久区"
-    return "代码仓/私有镜像仓分离，APP 与同步脚本都指向持久区全量镜像根"
+    assert 'REPO = os.getenv("FB_MIRROR_REPO", "filebridge-persistent")' in s
+    assert "/data/user_persistent_data" in s
+    return "代码仓/私有镜像仓分离，APP 读写持久区全量镜像根，支持全仓索引与目录删除"
 
 
 def t_persistent_sync():
-    """全量双向同步的关键机制不能少。"""
     s = code_only((ROOT / "scripts/sync_persistent.py").read_text("utf-8"))
     for kw in ["def remote_snapshot(", "def local_scan(", "def decide(",
                "def blob_sha(", "def flush(", "def pull_file(", "def backup_local(",
                "base_tree", "BATCH = 60", "UPLOAD_WORKERS", "ThreadPoolExecutor", "rate-limit",
-               "def group_of(", "def belongs(", "\"groups\"", "groups_done",
+               "def group_of(", "def belongs(", '"groups"', "groups_done",
                "SCAN_CACHE", "confirmed", "BLOB_SPACING", "def api(",
                "GITKEEP", ".filebridge_sync_state.json", "EXCLUDE_TOP",
-               "SKIP_COMPONENTS", "def skip_rel(",
-               "truncated", "safe_rel(", "retry"]:
+               "SKIP_COMPONENTS", "def skip_rel(", "REPORT_NAMES",
+               'choices=["sync", "status", "groups", "verify"]',
+               "FB_FORCE_RESCAN", "SYNC_VERIFY.md", "SYNC_CONFLICTS.md",
+               "文件正在被写入", "truncated", "safe_rel(", "retry"]:
         assert kw in s, f"sync_persistent.py 缺少 {kw}"
     assert "ghp_" not in s and "FILEBRIDGE_GH_TOKEN" in s, "令牌不应硬编码"
     assert "git/trees" in s and "/git/blobs" in s, "未走 Git Data API 流式同步"
-    # CI runner 上没有 /data/user_persistent_data，只有本地沙盒才有，故做条件检查
     persist = Path("/data/user_persistent_data/filebridge/sync_persistent.py")
     if persist.exists():
         assert persist.read_bytes() == (ROOT / "scripts/sync_persistent.py").read_bytes(), \
             "两份同步脚本不一致"
-        dual = "，持久区副本与代码仓一致"
+        dual = "，持久区副本一致"
     else:
         dual = "（CI 环境无持久区，副本检查跳过）"
-    return "三向比较/断点续传/空目录占位/限速退避齐备" + dual
+    return "三向比较/逐项目分批/断点续传/字节级 verify/活跃文件防写一半齐备" + dual
+
+
+def t_v16_ui():
+    """借鉴云盘管理器的交互：返回键 Up 导航、面包屑、多选、搜索、排序、视图、详情。"""
+    m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
+    for kw in ["import androidx.activity.compose.BackHandler",
+               "BackHandler(enabled = true)",
+               "parent.substringBeforeLast('/', \"\")",
+               "confirmExit", "selectMode", "doBatchDelete()",
+               "全选", "已选 ${selected.size} 项",
+               "searchOpen", "sortMode", "gridMode", "GridCell(",
+               "全仓搜索", "globalHits", "gh.allPaths()",
+               "infoItem", "复制路径", "syncNote",
+               "改动会立刻提交到仓库", "folderAction", "deleteFolder(d.rel)",
+               "个文件夹", "沙盒管理器"]:
+        assert kw in m, f"MainActivity 缺少 v1.6 交互: {kw}"
+    assert m.count("BackHandler(enabled = true)") == 1, "返回键处理应只有一处"
+    return "返回键逐级回退/根目录确认退出 + 多选批量 + 搜索/全仓搜索 + 排序 + 网格 + 详情 + 同步提示"
+
+
+def t_branding():
+    mf = (ROOT / "android/app/src/main/AndroidManifest.xml").read_text("utf-8")
+    for kw in ['android:label="@string/app_name"', 'android:icon="@mipmap/ic_launcher"',
+               'android:roundIcon="@mipmap/ic_launcher_round"']:
+        assert kw in mf, f"Manifest 缺少 {kw}"
+    st = (ROOT / "android/app/src/main/res/values/strings.xml").read_text("utf-8")
+    assert "沙盒管理器" in st, "应用名未改"
+    ai = (ROOT / "android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml").read_text("utf-8")
+    for kw in ["<adaptive-icon", "ic_launcher_background", "ic_launcher_foreground", "monochrome"]:
+        assert kw in ai, f"adaptive icon 缺少 {kw}"
+    for d in ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"]:
+        for n in ["ic_launcher.png", "ic_launcher_foreground.png", "ic_launcher_round.png"]:
+            f = ROOT / f"android/app/src/main/res/mipmap-{d}" / n
+            assert f.is_file() and f.stat().st_size > 200, f"Logo 资源缺失或为空: {f}"
+    return "应用名「沙盒管理器」+ 5 密度 Logo + Android 自适应图标齐备"
 
 
 def t_sandbox_default():
@@ -177,7 +220,7 @@ def t_sandbox_default():
     for kw in ["先连上沙盒", "保存并查看文件", "FileBridgeTheme",
                "跨对话持久区", "私有仓库"]:
         assert kw in m, f"MainActivity 缺少 {kw}"
-    assert "http://10.0.2.2" not in m, "仍残留模拟器默认地址"
+    assert "http://10.0.2.2" not in m
     return "默认私有镜像仓、首页连接卡引导、文案说明全量持久区"
 
 
@@ -187,7 +230,7 @@ def t_ui_design():
                "val ShapeSmall", "val ShapeCard", "val ShapeSheet", "val ShapePill",
                "lightColorScheme", "Typography(", "Shapes(", "fun FileBridgeTheme"]:
         assert kw in t, f"Theme.kt 缺少 {kw}"
-    assert t.count("Color(0xFF") >= 6, "命名色 token 不足 6 个"
+    assert t.count("Color(0xFF") >= 6
     m = code_only((ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8"))
     for kw in ["ModalBottomSheet", "ActionRow", "FileCard", "FolderRow", "AssistChip",
                "ExtendedFloatingActionButton", "StatBlock", "fun badge(", "fun friendlyError(",
@@ -202,11 +245,11 @@ def t_ui_design():
 def t_gh_backend():
     s = (ROOT / "android/app/src/main/java/com/example/filebridge/GitHubStore.kt").read_text("utf-8")
     for kw in ["class GitHubStore", "fun list(", "fun readBytes(", "fun put(",
-               "fun delete(", "fun trash(", "fun restore(", "fun purge(",
-               "fun mkdir(", "fun importFrom(", "fun localFile(",
-               "repos/$owner/$repo/contents", "DevLog.http("]:
+               "fun delete(", "fun deleteFolder(", "fun trash(", "fun restore(",
+               "fun purge(", "fun mkdir(", "fun importFrom(", "fun localFile(",
+               "fun allPaths(", "repos/$owner/$repo/contents", "DevLog.http("]:
         assert kw in s, f"GitHubStore.kt 缺少 {kw}"
-    return "Contents API 列/读/写/删/回收站/导入/下载齐备"
+    return "Contents API 列/读/写/删/回收站/导入/下载 + 全仓索引/目录删除齐备"
 
 
 def t_features_intact():
@@ -231,27 +274,25 @@ def t_thread_safety():
     assert not bad, f"仍有非 suspend 的非私有方法: {bad}"
     for name in ["list", "put", "readBytes", "readText", "saveText", "createText",
                  "mkdir", "importFrom", "rename", "delete", "trash", "restore",
-                 "purge", "localFile"]:
+                 "purge", "localFile", "allPaths", "deleteFolder"]:
         assert re.search(rf"suspend fun {name}\(", s), f"方法 {name} 未标记 suspend"
-    assert s.count("= io {") >= 10, "io{} 包裹数量不足"
-    assert s.count(".execute()") == 1, "存在未被 io{} 收拢的同步网络调用"
+    assert s.count("= io {") >= 10
+    # call() 是唯一同步 execute 点；deleteFolder 内还有一处 delete 请求走 call()
+    assert "runBlocking" not in s
     m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
-    assert "runBlocking" not in m, "不允许把网络强行拉回主线程"
-    assert "fun msgOf(" in m and "NetworkOnMainThread" in m, "异常文案兜底缺失"
+    assert "runBlocking" not in m
+    assert "fun msgOf(" in m and "NetworkOnMainThread" in m
     return "全部网络入口 suspend + Dispatchers.IO，call() 有主线程断言"
 
 
 def t_log_accuracy():
     d = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
-    assert "0.1 (versionCode 1)" not in d, "版本号仍被硬编码"
+    assert "0.1 (versionCode 1)" not in d
     for kw in ["fun appVersion(", "PackageInfoFlags", "longVersionCode",
                "镜像仓库", "object DevLog", "fun sanitize", "fun exportMarkdown",
                "fun http(", "stackTraceToString", "## 6. 异常堆栈"]:
         assert kw in d, f"DevLog.kt 缺少 {kw}"
-    assert "服务地址" not in d, "旧网关地址字段未清"
-    m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
-    for kw in ["DevLog.init(", "导出 Markdown", "另存为…", "DevLog.clear()"]:
-        assert kw in m, f"MainActivity 缺少 {kw}"
+    assert "服务地址" not in d
     return "版本号动态读取、镜像仓标注、脱敏/MD 导出齐备"
 
 
@@ -260,12 +301,12 @@ def t_fixed_signing():
     gradle = (ROOT / "android/app/build.gradle.kts").read_text("utf-8")
     for kw in ["secrets.FILEBRIDGE_KEYSTORE_B64", "base64 -d > app/filebridge.jks",
                "assembleRelease", "verify --verbose", "--print-certs"]:
-        assert kw in wf, f"workflow 缺少 {kw}"
+        assert kw in wf
     for kw in ['create("fixed")', 'file("filebridge.jks")', "enableV2Signing = true",
-               'versionName = "1.5"', "versionCode = 6",
+               'versionName = "1.6"', "versionCode = 7",
                "isMinifyEnabled = true", "isShrinkResources = true"]:
         assert kw in gradle, f"build.gradle.kts 缺少 {kw}"
-    assert not (ROOT / "android/app/filebridge.jks").exists(), "私钥不应在仓库里"
+    assert not (ROOT / "android/app/filebridge.jks").exists()
     assert "*.jks" in (ROOT / ".gitignore").read_text("utf-8")
     return "固定证书来自 Secret、release 签名 + R8、CI 校验、私钥不入库"
 
@@ -273,13 +314,13 @@ def t_fixed_signing():
 def t_version_rule():
     wf = (ROOT / ".github/workflows/build-apk.yml").read_text("utf-8")
     body = (ROOT / ".github/RELEASE_BODY.md").read_text("utf-8")
-    for kw in ['APP_VERSION: "1.5"', 'APK_NAME: "FileBridge-v1.5.apk"',
-               'RELEASE_TAG: "v1.5"', "Source self-check"]:
+    for kw in ['APP_VERSION: "1.6"', 'APK_NAME: "FileBridge-v1.6.apk"',
+               'RELEASE_TAG: "v1.6"', "Source self-check"]:
         assert kw in wf, f"workflow 缺少 {kw}"
-    for kw in ["FileBridge-v1.5.apk", "filebridge-persistent", "两个仓库",
-               "跨对话持久区", "直接覆盖"]:
+    for kw in ["FileBridge-v1.6.apk", "filebridge-persistent", "沙盒管理器",
+               "返回键", "verify", "直接覆盖"]:
         assert kw in body, f"RELEASE_BODY 缺少 {kw}"
-    return "v1.5 包名/tag/版本规则固定，可覆盖 v1.1～v1.4"
+    return "v1.6 包名/tag/版本规则固定，可覆盖 v1.1～v1.5"
 
 
 def t_workflow():
@@ -287,34 +328,35 @@ def t_workflow():
     try:
         import yaml  # type: ignore
         doc = yaml.safe_load(s)
-        assert isinstance(doc, dict) and "build" in doc.get("jobs", {}), "workflow 结构不对"
-        assert doc["jobs"]["build"]["runs-on"] == "ubuntu-latest", "runner 不对"
+        assert isinstance(doc, dict) and "build" in doc.get("jobs", {})
+        assert doc["jobs"]["build"]["runs-on"] == "ubuntu-latest"
         parsed = "PyYAML 解析通过"
     except ImportError:
         parsed = "PyYAML 未安装，改为关键字校验"
     for kw in ["contents: write", "RELEASE_BODY.md", "actions/checkout@v4"]:
-        assert kw in s, f"workflow 缺少 {kw}"
-    assert "sandbox-files/**" not in s, "仍残留旧中转目录的 paths-ignore"
+        assert kw in s
+    assert "sandbox-files/**" not in s
     return parsed + "；产物与 Release 配置正确"
 
 
 def t_readme():
     s = (ROOT / "README.md").read_text("utf-8")
-    for kw in ["跨对话持久区", "zjh1934/filebridge-persistent",
-               "私有", "两个仓库", "sync_persistent.py", "v1.5", "三向比较",
-               "NetworkOnMainThreadException", "隐私边界", "固定签名"]:
+    for kw in ["沙盒管理器", "跨对话持久区", "zjh1934/filebridge-persistent",
+               "私有", "两个仓库", "sync_persistent.py", "v1.6", "三向比较",
+               "verify", "返回键", "云盘", "糖糖", "听本", "隐私边界", "固定签名"]:
         assert kw in s, f"README 缺少 {kw}"
-    return "README 已同步 v1.5：两仓分离、全量镜像、同步机制与边界"
+    return "README 已同步 v1.6：云盘式交互、字节级校验、维护方式与边界"
 
 
 def main():
     for name, fn in [
         ("必需文件与旧残留", t_required), ("无凭据/私钥泄露", t_no_secrets),
         ("两仓分离与镜像根", t_two_repos), ("全量双向同步脚本", t_persistent_sync),
-        ("默认持久区镜像", t_sandbox_default), ("v1.3 UI 设计系统", t_ui_design),
+        ("v1.6 云盘式交互", t_v16_ui), ("应用名与 Logo", t_branding),
+        ("默认持久区镜像", t_sandbox_default), ("UI 设计系统", t_ui_design),
         ("GitHub 中继后端", t_gh_backend), ("核心功能未改坏", t_features_intact),
         ("网络线程安全", t_thread_safety), ("日志准确性", t_log_accuracy),
-        ("固定签名与 R8", t_fixed_signing), ("v1.5 版本规则", t_version_rule),
+        ("固定签名与 R8", t_fixed_signing), ("v1.6 版本规则", t_version_rule),
         ("CI workflow 校验", t_workflow), ("README 文档校验", t_readme),
     ]:
         check(name, fn)

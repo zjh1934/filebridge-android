@@ -1,13 +1,16 @@
 package com.example.filebridge
 
 import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -213,14 +216,32 @@ private fun ActionRow(
 }
 
 @Composable
-private fun FileCard(f: FileItem, onAction: () -> Unit) {
+private fun FileCard(
+    f: FileItem,
+    onAction: () -> Unit,
+    selected: Boolean = false,
+    selectMode: Boolean = false,
+    onToggle: () -> Unit = {},
+) {
     val (tag, color) = badge(f.name)
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
         shape = FB.ShapeCard,
         colors = CardDefaults.cardColors(containerColor = FB.Surface),
     ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.padding(14.dp)
+                .clickable { if (selectMode) onToggle() else onAction() },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (selectMode) {
+                Box(
+                    Modifier.size(26.dp).clip(RoundedCornerShape(8.dp))
+                        .background(if (selected) FB.Accent else FB.AccentSoft),
+                    contentAlignment = Alignment.Center,
+                ) { Text(text = if (selected) "✓" else "", fontSize = 14.sp, color = Color.White) }
+                Spacer(Modifier.width(10.dp))
+            }
             Box(
                 Modifier.size(44.dp).clip(RoundedCornerShape(12.dp))
                     .background(color.copy(alpha = 0.12f)),
@@ -237,25 +258,43 @@ private fun FileCard(f: FileItem, onAction: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.width(10.dp))
-            Surface(
-                shape = FB.ShapeSmall,
-                color = FB.AccentSoft,
-                modifier = Modifier.clip(FB.ShapeSmall).clickable(onClick = onAction),
-            ) {
-                Text(text = "操作", fontSize = 12.sp, color = FB.Accent,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+            if (!selectMode) {
+                Surface(
+                    shape = FB.ShapeSmall,
+                    color = FB.AccentSoft,
+                    modifier = Modifier.clip(FB.ShapeSmall).clickable(onClick = onAction),
+                ) {
+                    Text(text = "操作", fontSize = 12.sp, color = FB.Accent,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun FolderRow(d: FileItem, onClick: () -> Unit) {
+private fun FolderRow(
+    d: FileItem,
+    onClick: () -> Unit,
+    onAction: () -> Unit = {},
+    selected: Boolean = false,
+    selectMode: Boolean = false,
+    onToggle: () -> Unit = {},
+) {
     Row(
-        modifier = Modifier.fillMaxWidth().clip(FB.ShapeSmall).clickable(onClick = onClick)
+        modifier = Modifier.fillMaxWidth().clip(FB.ShapeSmall)
+            .clickable { if (selectMode) onToggle() else onClick() }
             .padding(vertical = 13.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selectMode) {
+            Box(
+                Modifier.size(26.dp).clip(RoundedCornerShape(8.dp))
+                    .background(if (selected) FB.Accent else FB.AccentSoft),
+                contentAlignment = Alignment.Center,
+            ) { Text(text = if (selected) "✓" else "", fontSize = 14.sp, color = Color.White) }
+            Spacer(Modifier.width(10.dp))
+        }
         Box(
             Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).background(FB.AccentSoft),
             contentAlignment = Alignment.Center,
@@ -265,9 +304,68 @@ private fun FolderRow(d: FileItem, onClick: () -> Unit) {
         Spacer(Modifier.width(14.dp))
         Text(text = d.name, style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(text = "进入", style = MaterialTheme.typography.bodySmall)
+        if (!selectMode) {
+            Surface(
+                shape = FB.ShapeSmall,
+                color = FB.AccentSoft,
+                modifier = Modifier.clip(FB.ShapeSmall).clickable(onClick = onAction),
+            ) {
+                Text(text = "⋯", fontSize = 14.sp, color = FB.Accent,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+            }
+        } else {
+            Text(text = "选择", style = MaterialTheme.typography.bodySmall)
+        }
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(FB.Line))
+}
+
+/** 网格视图单元：云盘式大图标 + 名称 + 大小，选中态明确 */
+@Composable
+private fun GridCell(
+    f: FileItem,
+    selected: Boolean,
+    selectMode: Boolean,
+    onClick: () -> Unit,
+    onToggle: () -> Unit,
+    onAction: () -> Unit,
+) {
+    val (tag, color) = badge(f.name)
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(4.dp).clickable {
+            if (selectMode) onToggle() else onClick()
+        },
+        shape = FB.ShapeCard,
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) FB.AccentSoft else FB.Surface
+        ),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(34.dp).clip(RoundedCornerShape(10.dp))
+                        .background(color.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center,
+                ) { Text(text = tag, fontSize = 10.sp, color = color) }
+                Spacer(Modifier.weight(1f))
+                if (selectMode) {
+                    Box(
+                        Modifier.size(22.dp).clip(RoundedCornerShape(7.dp))
+                            .background(if (selected) FB.Accent else FB.AccentSoft),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(text = if (selected) "✓" else "", fontSize = 12.sp, color = Color.White) }
+                } else {
+                    Text(text = "⋯", fontSize = 15.sp, color = FB.Slate,
+                        modifier = Modifier.clickable(onClick = onAction))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(text = f.name, style = MaterialTheme.typography.titleSmall,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(text = if (f.type == "dir") "文件夹" else fmtSize(f.size),
+                style = MaterialTheme.typography.bodySmall)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- 主界面
@@ -301,6 +399,22 @@ fun App() {
     var logSummary by remember { mutableStateOf<DevLog.Summary?>(null) }
     var exportedPath by remember { mutableStateOf("") }
     var pending by remember { mutableStateOf<Pair<String, FileItem?>>("import" to null) }
+    // v1.6 云盘式交互：返回键、搜索、排序、视图、多选、详情、同步提示
+    var query by remember { mutableStateOf("") }
+    var searchOpen by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(0) }        // 0 名称 / 1 大小 / 2 类型
+    var gridMode by remember { mutableStateOf(false) }
+    var selectMode by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var infoItem by remember { mutableStateOf<FileItem?>(null) }
+    var folderAction by remember { mutableStateOf<FileItem?>(null) }
+    var confirmBatchDel by remember { mutableStateOf(false) }
+    var confirmFolderDel by remember { mutableStateOf<FileItem?>(null) }
+    var confirmExit by remember { mutableStateOf(false) }
+    var globalOpen by remember { mutableStateOf(false) }
+    var globalHits by remember { mutableStateOf<List<String>>(emptyList()) }
+    var globalBusy by remember { mutableStateOf(false) }
+    var syncNote by remember { mutableStateOf(true) }
 
     val gh = remember(token) { GitHubStore(ctx, GH_OWNER, GH_REPO, token, GH_ROOT) }
     val scope = rememberCoroutineScope()
@@ -332,9 +446,25 @@ fun App() {
         }
     }
 
+    // 返回键：先退出多选/搜索，再逐级返回上一级目录；到根目录才询问是否退出。
+    // 之前完全没有处理，系统返回键会直接杀掉 Activity —— 这是 v1.5 最明显的半成品感。
+    BackHandler(enabled = true) {
+        when {
+            selectMode -> { selectMode = false; selected = emptySet() }
+            searchOpen -> { searchOpen = false; query = "" }
+            globalOpen -> globalOpen = false
+            parent.isNotBlank() -> {
+                parent = parent.substringBeforeLast('/', "")
+                selected = emptySet()
+                DevLog.i("NAV", "返回上一级 → /$parent")
+            }
+            else -> confirmExit = true
+        }
+    }
+
     LaunchedEffect(Unit) {
         DevLog.init(ctx)
-        DevLog.i("APP", "界面启动 · v1.3 设计系统版 · 目标是查看和编辑沙盒文件")
+        DevLog.i("APP", "界面启动 · 沙盒管理器 v1.6 · 云盘式交互 / 返回键逐级回退 / 改动即时提交仓库")
     }
     DisposableEffect(Unit) {
         onDispose { DevLog.i("APP", "界面退到后台") }
@@ -399,9 +529,74 @@ fun App() {
 
     val segments = parent.split("/").filter { it.isNotEmpty() }
 
+    fun toggleSel(rel: String) {
+        selected = if (rel in selected) selected - rel else selected + rel
+    }
+
+    fun doBatchDelete() {
+        scope.launch {
+            try {
+                busy = true
+                val n = selected.size
+                for (rel in selected) {
+                    if (dirs.any { it.rel == rel }) gh.deleteFolder(rel) else gh.delete(rel)
+                }
+                selectMode = false
+                selected = emptySet()
+                confirmBatchDel = false
+                DevLog.i("UI", "批量删除 $n 项 → 已提交仓库")
+                refresh()
+                Toast.makeText(ctx, "$n 项已移到回收站（仓库已更新）", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                reportError("批量删除失败：${msgOf(e)}")
+                busy = false
+            }
+        }
+    }
+
+    val shownDirs = dirs.filter { it.name.contains(query, ignoreCase = true) }
+        .let { l -> if (sortMode == 1) l.sortedByDescending { it.size } else l.sortedBy { it.name } }
+    val shownFiles = files.filter { it.name.contains(query, ignoreCase = true) }
+        .let { l -> when (sortMode) {
+            1 -> l.sortedByDescending { it.size }
+            2 -> l.sortedBy { shortType(it.name) }
+            else -> l.sortedBy { it.name }
+        } }
+    val allShown: List<FileItem> = shownDirs + shownFiles
+
     // ------------------------------------------------------------ 页面骨架
     androidx.compose.material3.Scaffold(
         containerColor = FB.Paper,
+        bottomBar = {
+            if (selectMode) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = FB.Surface,
+                    shadowElevation = 8.dp,
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(text = "已选 ${selected.size} 项",
+                            style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = {
+                            selected = if (selected.size == allShown.size) emptySet()
+                                       else allShown.map { it.rel }.toSet()
+                        }) { Text("全选") }
+                        Button(
+                            onClick = { if (selected.isNotEmpty()) confirmBatchDel = true },
+                            shape = FB.ShapePill,
+                            colors = ButtonDefaults.buttonColors(containerColor = FB.Danger),
+                        ) { Text("删除") }
+                        TextButton(onClick = { selectMode = false; selected = emptySet() }) {
+                            Text("取消")
+                        }
+                    }
+                }
+            }
+        },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { createSheet = true },
@@ -418,8 +613,8 @@ fun App() {
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(text = "沙盒文件", style = MaterialTheme.typography.displaySmall)
-                        Text(text = "在手机上查看和编辑云端沙盒里的文件",
+                        Text(text = "沙盒管理器", style = MaterialTheme.typography.displaySmall)
+                        Text(text = "在手机上查看和编辑沙盒持久区的文件",
                             style = MaterialTheme.typography.bodySmall)
                     }
                     Spacer(Modifier.width(12.dp))
@@ -565,6 +760,52 @@ fun App() {
                             colors = AssistChipDefaults.assistChipColors(containerColor = FB.Surface),
                         )
                         AssistChip(
+                            onClick = { searchOpen = !searchOpen; if (!searchOpen) query = "" },
+                            label = { Text(if (searchOpen) "关闭搜索" else "搜索") },
+                            shape = FB.ShapePill,
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = if (searchOpen) FB.AccentSoft else FB.Surface),
+                        )
+                        AssistChip(
+                            onClick = { sortMode = (sortMode + 1) % 3 },
+                            label = { Text(when (sortMode) {
+                                0 -> "排序·名称"; 1 -> "排序·大小"; else -> "排序·类型" }) },
+                            shape = FB.ShapePill,
+                            colors = AssistChipDefaults.assistChipColors(containerColor = FB.Surface),
+                        )
+                        AssistChip(
+                            onClick = { gridMode = !gridMode },
+                            label = { Text(if (gridMode) "列表" else "网格") },
+                            shape = FB.ShapePill,
+                            colors = AssistChipDefaults.assistChipColors(containerColor = FB.Surface),
+                        )
+                        AssistChip(
+                            onClick = {
+                                selectMode = !selectMode
+                                if (!selectMode) selected = emptySet()
+                            },
+                            label = { Text(if (selectMode) "退出多选" else "多选") },
+                            shape = FB.ShapePill,
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = if (selectMode) FB.AccentSoft else FB.Surface),
+                        )
+                        AssistChip(
+                            onClick = {
+                                globalOpen = true
+                                scope.launch {
+                                    try {
+                                        globalBusy = true
+                                        globalHits = gh.allPaths()
+                                    } catch (e: Exception) {
+                                        reportError("全仓索引失败：${msgOf(e)}")
+                                    } finally { globalBusy = false }
+                                }
+                            },
+                            label = { Text("全仓搜索") },
+                            shape = FB.ShapePill,
+                            colors = AssistChipDefaults.assistChipColors(containerColor = FB.Surface),
+                        )
+                        AssistChip(
                             onClick = {
                                 scope.launch {
                                     try {
@@ -591,10 +832,89 @@ fun App() {
                     }
                 }
 
-                items(dirs) { d: FileItem -> FolderRow(d) { parent = joinPath(parent, d.name) } }
-                items(files) { f: FileItem -> FileCard(f) { actionItem = f } }
+                if (searchOpen) {
+                    item {
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            label = { Text("在当前目录里找文件") },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            shape = FB.ShapeSmall,
+                            singleLine = true,
+                        )
+                    }
+                }
 
-                if (token.isNotBlank() && error.isEmpty() && dirs.isEmpty() && files.isEmpty() && !busy) {
+                if (syncNote && token.isNotBlank() && error.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            shape = FB.ShapeCard,
+                            colors = CardDefaults.cardColors(containerColor = FB.AccentSoft),
+                        ) {
+                            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(text = "改动会立刻提交到仓库",
+                                        style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        text = "编辑、新建、删除、改名都会即时写入私有镜像仓。沙盒里 AI 新写的文件，说一句「同步持久区」我就回灌，两边就一致了。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                TextButton(onClick = { syncNote = false }) { Text("知道了") }
+                            }
+                        }
+                    }
+                }
+
+                if (gridMode) {
+                    items(allShown.chunked(2)) { pair: List<FileItem> ->
+                        Row(Modifier.fillMaxWidth()) {
+                            pair.forEach { it: FileItem ->
+                                Box(Modifier.weight(1f)) {
+                                    GridCell(
+                                        f = it,
+                                        selected = it.rel in selected,
+                                        selectMode = selectMode,
+                                        onClick = {
+                                            if (it.type == "dir") parent = joinPath(parent, it.name)
+                                            else actionItem = it
+                                        },
+                                        onToggle = { toggleSel(it.rel) },
+                                        onAction = {
+                                            if (it.type == "dir") folderAction = it
+                                            else actionItem = it
+                                        },
+                                    )
+                                }
+                            }
+                            if (pair.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                } else {
+                    items(shownDirs) { d: FileItem ->
+                        FolderRow(
+                            d = d,
+                            onClick = { parent = joinPath(parent, d.name) },
+                            onAction = { folderAction = d },
+                            selected = d.rel in selected,
+                            selectMode = selectMode,
+                            onToggle = { toggleSel(d.rel) },
+                        )
+                    }
+                    items(shownFiles) { f: FileItem ->
+                        FileCard(
+                            f = f,
+                            onAction = { actionItem = f },
+                            selected = f.rel in selected,
+                            selectMode = selectMode,
+                            onToggle = { toggleSel(f.rel) },
+                        )
+                    }
+                }
+
+                if (token.isNotBlank() && error.isEmpty() && allShown.isEmpty() && !busy) {
                     item {
                         Column(
                             Modifier.fillMaxWidth().padding(vertical = 64.dp),
@@ -612,7 +932,176 @@ fun App() {
                     }
                 }
 
+                item {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "${shownDirs.size} 个文件夹 · ${shownFiles.size} 个文件"
+                                + if (selectMode) " · 已选 ${selected.size}" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                }
                 item { Spacer(Modifier.height(88.dp)) }   // 给悬浮按钮留位置
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ v1.6 新增交互
+    if (confirmExit) {
+        AlertDialog(
+            onDismissRequest = { confirmExit = false },
+            title = { Text("要退出沙盒管理器吗？") },
+            text = { Text("已经在最顶层目录了。再按返回键会退出应用，改动都已经提交到仓库，不会丢。") },
+            confirmButton = {
+                Button(onClick = { (ctx as? android.app.Activity)?.finish() },
+                    shape = FB.ShapePill) { Text("退出") }
+            },
+            dismissButton = { TextButton(onClick = { confirmExit = false }) { Text("留在这") } },
+        )
+    }
+
+    if (confirmBatchDel) {
+        AlertDialog(
+            onDismissRequest = { confirmBatchDel = false },
+            title = { Text("把选中的 ${selected.size} 项移到回收站？") },
+            text = { Text("会立刻提交到镜像仓，之后能在回收站里恢复。") },
+            confirmButton = {
+                Button(onClick = { doBatchDelete() }, shape = FB.ShapePill,
+                    colors = ButtonDefaults.buttonColors(containerColor = FB.Danger)
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { confirmBatchDel = false }) { Text("取消") } },
+        )
+    }
+
+    folderAction?.let { d: FileItem ->
+        ModalBottomSheet(
+            onDismissRequest = { folderAction = null },
+            containerColor = FB.Surface,
+            shape = FB.ShapeSheet,
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+                Text(text = d.name, style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(text = "文件夹 · /${d.rel}", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(12.dp))
+                ActionRow("进入", "查看这个目录里的内容") {
+                    folderAction = null
+                    parent = joinPath(parent, d.name)
+                }
+                ActionRow("详情", "看完整路径与仓库信息") {
+                    folderAction = null
+                    infoItem = d
+                }
+                ActionRow("删除整个目录", "里面所有文件一起进回收站，可整体恢复") {
+                    folderAction = null
+                    confirmFolderDel = d
+                }
+            }
+        }
+    }
+
+    confirmFolderDel?.let { d: FileItem ->
+        AlertDialog(
+            onDismissRequest = { confirmFolderDel = null },
+            title = { Text("删除目录「${d.name}」？") },
+            text = { Text("会递归删除里面所有文件，并作为一条记录放进回收站，可整体恢复。操作会立即提交到仓库。") },
+            confirmButton = {
+                Button(onClick = {
+                    scope.launch {
+                        try {
+                            busy = true
+                            val n = gh.deleteFolder(d.rel)
+                            confirmFolderDel = null
+                            DevLog.i("UI", "删除目录 /${d.rel} · $n 文件 → 仓库已更新")
+                            refresh()
+                            Toast.makeText(ctx, "目录已进回收站（$n 个文件）", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            reportError("删除目录失败：${msgOf(e)}")
+                            busy = false
+                        }
+                    }
+                }, shape = FB.ShapePill,
+                    colors = ButtonDefaults.buttonColors(containerColor = FB.Danger)
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { confirmFolderDel = null }) { Text("取消") } },
+        )
+    }
+
+    infoItem?.let { f: FileItem ->
+        AlertDialog(
+            onDismissRequest = { infoItem = null },
+            title = { Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    Text("路径：/${f.rel}", style = MaterialTheme.typography.bodySmall)
+                    Text("类型：${if (f.type == "dir") "文件夹" else shortType(f.name)}",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("大小：${fmtSize(f.size)}", style = MaterialTheme.typography.bodySmall)
+                    Text("仓库 sha：${f.sha256.take(12)}", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(6.dp))
+                    Text("这个 sha 是 Git 内容指纹；保存后会变，可用来确认改动确实进了仓库。",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("path", f.rel))
+                    Toast.makeText(ctx, "路径已复制", Toast.LENGTH_SHORT).show()
+                    infoItem = null
+                }, shape = FB.ShapePill) { Text("复制路径") }
+            },
+            dismissButton = { TextButton(onClick = { infoItem = null }) { Text("关闭") } },
+        )
+    }
+
+    if (globalOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { globalOpen = false },
+            containerColor = FB.Surface,
+            shape = FB.ShapeSheet,
+        ) {
+            var gq by remember { mutableStateOf("") }
+            val hits = globalHits.filter { it.contains(gq, ignoreCase = true) }.take(120)
+            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+                Text(text = "全仓搜索", style = MaterialTheme.typography.titleLarge)
+                Text(text = "一次读取整棵目录树（${globalHits.size} 个文件），按文件名找，不用一层层翻。",
+                    style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = gq,
+                    onValueChange = { gq = it },
+                    label = { Text("输入文件名关键词") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = FB.ShapeSmall,
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                if (globalBusy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = FB.Accent)
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+                        items(hits) { path: String ->
+                            Column(
+                                Modifier.fillMaxWidth().clickable {
+                                    parent = path.substringBeforeLast('/', "")
+                                    query = ""
+                                    searchOpen = false
+                                    globalOpen = false
+                                }.padding(vertical = 10.dp),
+                            ) {
+                                Text(text = path.substringAfterLast('/'),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(text = "/$path", style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Box(Modifier.fillMaxWidth().height(1.dp).background(FB.Line))
+                        }
+                    }
+                }
             }
         }
     }
@@ -654,6 +1143,10 @@ fun App() {
                 Text(text = "${fmtSize(f.size)} · ${shortType(f.name)}",
                     style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
+                ActionRow("详情", "看完整路径、大小与仓库里的 sha") {
+                    actionItem = null
+                    infoItem = f
+                }
                 ActionRow("打开", "用手机上能打开这类文件的应用查看") {
                     actionItem = null
                     scope.launch {

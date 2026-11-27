@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">沙盒管理器</string>
+    <string name="sync_hint">保存即提交到私有镜像仓；沙盒侧改动由同步脚本回灌</string>
+</resources>

@@ -48,6 +48,7 @@ CONFLICTS = Path(os.getenv("FB_CONFLICT_DIR", "/data/workspace/conflicts"))
 TOKEN = os.getenv("FILEBRIDGE_GH_TOKEN", "").strip()
 
 EXCLUDE_TOP = {".filebridge_sync_state.json", ".filebridge_scan_cache.json"}  # 内部状态不进镜像
+REPORT_NAMES = {"SYNC_VERIFY.md", "SYNC_CONFLICTS.md"}   # 同步报告也不进镜像
 # 持久区里 听本/tingben/.git 是另一个 Git 仓库的元数据（3547 个对象）。
 # GitHub 的 tree API 把 ".git" 视为非法路径组件，且镜像仓本身就是 Git 仓库，
 # 把内部对象塞进去没有意义 —— 全量镜像时跳过，其它文件一个不少。
@@ -55,7 +56,9 @@ SKIP_COMPONENTS = {".git"}
 
 def skip_rel(rel: str) -> bool:
     parts = Path(rel).parts
-    return any(c in SKIP_COMPONENTS for c in parts) or rel in EXCLUDE_TOP
+    return (any(c in SKIP_COMPONENTS for c in parts)
+            or rel in EXCLUDE_TOP
+            or parts[-1] in REPORT_NAMES)
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 60                                        # 每批 tree 条目数：树变大后 GitHub 会拒绝大批量
@@ -234,7 +237,7 @@ def belongs(rel: str, group: str | None) -> bool:
     return group is None or group == "all" or group_of(rel) == group
 
 
-def local_scan(state: dict):
+def local_scan(state: dict, force: bool = False):
     """扫描持久区；size + mtime_ns 未变时复用上次的 sha，避免反复读 1 GB 内容。"""
     info, empties = {}, []
     n = 0
@@ -248,7 +251,7 @@ def local_scan(state: dict):
             continue
         st = p.stat()
         prev = state.get(rel)
-        if prev and prev.get("size") == st.st_size and prev.get("mtime_ns") == st.st_mtime_ns:
+        if not force and prev and prev.get("size") == st.st_size and prev.get("mtime_ns") == st.st_mtime_ns:
             info[rel] = {"sha": prev["sha"], "size": st.st_size, "mtime_ns": st.st_mtime_ns}
         else:
             info[rel] = {
@@ -341,7 +344,7 @@ def main() -> int:
         description="持久区 ↔ 私有镜像仓：首次可逐项目同步，后续靠三向比较自动检测变化"
     )
     ap.add_argument("action", nargs="?", default="sync",
-                    choices=["sync", "status", "groups"])
+                    choices=["sync", "status", "groups", "verify"])
     ap.add_argument("target", nargs="?", default=None,
                     help="项目名（顶层目录，或 _root）；不填 = 所有项目做增量检测")
     args = ap.parse_args()
@@ -355,7 +358,8 @@ def main() -> int:
     meta = load_meta()
     confirmed = dict(meta["files"])          # 已确认同步的基准（不是本地扫描结果）
     groups_done = meta["groups"]
-    info, empties = local_scan(load_scan_cache())
+    force = os.getenv("FB_FORCE_RESCAN", "") == "1"
+    info, empties = local_scan(load_scan_cache(), force=force)
     save_scan_cache(info)
     base = {k: v["sha"] for k, v in confirmed.items()}
     local = {k: v["sha"] for k, v in info.items()}
@@ -372,6 +376,40 @@ def main() -> int:
         g["files"] += 1
         g["bytes"] += m["size"]
     order = sorted(inventory, key=lambda g: inventory[g]["bytes"])
+
+    if args.action == "verify":
+        # 字节级一致性校验：本地每个文件按 git blob sha1 重算，与远端 tree 的 sha 逐项比对。
+        # 这是回答「脚本到底有没有把两边弄成一样」的唯一硬证据。
+        rl = {k: v["sha"] for k, v in info.items()}
+        only_local = sorted(set(rl) - set(remote))
+        only_remote = sorted(set(remote) - set(rl))
+        diff = sorted(k for k in set(rl) & set(remote) if rl[k] != remote[k])
+        same = len(set(rl) & set(remote)) - len(diff)
+        ok = not only_local and not only_remote and not diff
+        lines = ["# 持久区 ↔ 镜像仓 字节级一致性报告", "",
+                 f"- 校验时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                 f"- 强制重算：`{'是' if force else '否'}`（FB_FORCE_RESCAN=1 可强制重读全部文件）",
+                 f"- 本地 {len(rl)} 文件 / 远端 {len(remote)} 文件",
+                 f"- **结论：{'✅ 完全一致' if ok else '❌ 存在差异'}**", "",
+                 "| 类别 | 数量 |", "| --- | --- |",
+                 f"| 内容一致 | {same} |",
+                 f"| 内容不同 | {len(diff)} |",
+                 f"| 仅沙盒有（未上传） | {len(only_local)} |",
+                 f"| 仅仓库有（未回灌） | {len(only_remote)} |", ""]
+        for title, arr in [("内容不同的文件", diff), ("仅沙盒有", only_local), ("仅仓库有", only_remote)]:
+            lines.append(f"## {title}" if arr else f"## {title}\n\n_无_")
+            if arr:
+                lines.append("")
+                for r in arr[:60]:
+                    lines.append(f"- `{r}`")
+                if len(arr) > 60:
+                    lines.append(f"- … 另有 {len(arr)-60} 个")
+                lines.append("")
+        report = "\n".join(lines) + "\n"
+        (LOCAL / "filebridge" / "SYNC_VERIFY.md").write_text(report, "utf-8")
+        print(report)
+        print("报告：/data/user_persistent_data/filebridge/SYNC_VERIFY.md")
+        return 0 if ok else 1
 
     if args.action == "groups":
         print(f"持久区项目清单（共 {len(info)} 文件 / {sum(v['bytes'] for v in inventory.values())/1048576:.1f} MB）")
@@ -405,6 +443,17 @@ def main() -> int:
         return 0
 
     # 冲突：以远端（手机编辑）为准，本地版本备份后回灌
+    if conflicts:
+        try:
+            lines = ["# 同步冲突记录", "",
+                     "两边都改了同一个文件：默认以手机/镜像仓版本为准，沙盒本地版本已备份到 `/data/workspace/conflicts/`。", ""]
+            for r in conflicts:
+                lines.append(f"- `{r}`")
+            lines += ["", f"记录时间：{time.strftime('%Y-%m-%d %H:%M:%S')}", ""]
+            (LOCAL / "filebridge" / "SYNC_CONFLICTS.md").write_text(
+                "\n".join(lines), "utf-8")
+        except Exception:
+            pass
     for rel in conflicts:
         if rel in local and rel in remote:
             backup_local(rel)
@@ -465,7 +514,14 @@ def main() -> int:
     def upload_one(rel: str):
         if not safe_rel(rel):
             return None
+        before = (LOCAL / rel).stat()
         data = (LOCAL / rel).read_bytes()
+        after = (LOCAL / rel).stat()
+        # 活跃项目（lovers / 听本）里的 AI 会不停写文件：
+        # 如果读的瞬间文件还在变，本轮跳过，绝不把写一半的字节提交上去。
+        if after.st_mtime_ns != before.st_mtime_ns or after.st_size != len(data):
+            print(f"[skip] 文件正在被写入，留到下一轮: {rel}", flush=True)
+            return None
         sha = blob_sha(data)
         with known_lock:
             exists = sha in known

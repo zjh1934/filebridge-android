@@ -50,6 +50,7 @@ class GitHubStore(
 
     private val api = "https://api.github.com/repos/$owner/$repo/contents"
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+    private val REMOTE_META_NAME = ".filebridge-mirror-info.md"
 
     /** 所有网络与文件 IO 都必须经过这里。block 是 suspend lambda，允许嵌套调用其它 public 方法。 */
     private suspend fun <T> io(block: suspend CoroutineScope.() -> T): T =
@@ -164,6 +165,40 @@ class GitHubStore(
         return call(req)
     }
 
+    /** 非 suspend 的列目录，仅供 io{} 内部的递归遍历使用 */
+    private fun listRaw(rel: String): JSONArray? {
+        val req = headers().url(contentsUrl(rel)).get().build()
+        return call(req)?.optJSONArray("__array")
+    }
+
+    /** 全仓路径索引：一次拿整棵树，供「全仓搜索」用，不用逐级翻目录 */
+    suspend fun allPaths(): List<String> = io {
+        val req = headers()
+            .url("https://api.github.com/repos/$owner/$repo/git/trees/$branch?recursive=1")
+            .get().build()
+        val j = call(req) ?: return@io emptyList()
+        val arr = j.optJSONArray("tree") ?: return@io emptyList()
+        val out = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("type") != "blob") continue
+            val p = o.optString("path")
+            if (p.isBlank() || p == REMOTE_META_NAME) continue
+            if (p.contains("/.trash/") || p.endsWith("/.gitkeep")) continue
+            if (root.isNotBlank() && !p.startsWith(root.trim('/') + "/")) continue
+            out += if (root.isBlank()) p else p.removePrefix(root.trim('/') + "/")
+        }
+        DevLog.i("GH", "全仓索引 · ${out.size} 个文件")
+        out.sorted()
+    }
+
+    private fun deleteBySha(rel: String, sha: String, message: String) {
+        val o = JSONObject().put("message", message).put("sha", sha).put("branch", branch)
+        val req = headers().url(contentsUrl(rel, withRef = false))
+            .delete(o.toString().toRequestBody(jsonMedia)).build()
+        call(req)
+    }
+
     /** 读原始字节。>1MB 时 content 为空，改走 blob 接口 */
     suspend fun readBytes(rel: String): ByteArray = io {
         val j = getRaw(rel) ?: error("仓库里没有这个文件")
@@ -264,6 +299,71 @@ class GitHubStore(
         DevLog.i("GH", "沙盒文件 /$rel 移入回收站 (id=$id)")
     }
 
+    /**
+     * 删除整个文件夹：递归收集所有文件，把「路径 + 内容」打包成一条回收站元信息，
+     * 再逐个删除（含 .gitkeep 占位）。恢复时从这条记录整体重建，不用翻一堆碎片。
+     */
+    suspend fun deleteFolder(rel: String): Int = io {
+        val found = mutableListOf<Pair<String, ByteArray>>()
+        val toDelete = mutableListOf<Pair<String, String>>()   // path -> git blob sha
+
+        fun walk(dir: String) {
+            val arr = listRaw(dir) ?: return
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val p = o.optString("path")       // 仓库内全路径（root 为空时等同相对路径）
+                val sha = o.optString("sha")
+                if (o.optString("type") == "dir") {
+                    walk(if (root.isBlank()) p else p.removePrefix(root.trim('/') + "/"))
+                } else {
+                    val localRel = if (root.isBlank()) p else p.removePrefix(root.trim('/') + "/")
+                    val bytes = try { readBytesSync(localRel) } catch (_: Exception) { ByteArray(0) }
+                    found += localRel to bytes
+                    toDelete += p to sha
+                }
+            }
+        }
+
+        // listRaw 用 contentsUrl(rel) 已带 root 前缀，返回项的 path 是仓库全路径
+        walk(rel)
+
+        val id = System.currentTimeMillis().toString().takeLast(10)
+        val name = rel.substringAfterLast('/')
+        val meta = JSONObject().put("rel", rel).put("name", name).put("isDir", true)
+        val fa = JSONArray()
+        for ((r, b) in found) {
+            fa.put(JSONObject().put("rel", r)
+                .put("content", android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP)))
+        }
+        meta.put("files", fa)
+        val metaRel = joinRel(".trash", "$id.meta")
+        put(metaRel, meta.toString().toByteArray(), "FileBridge: 删除目录 $name（${found.size} 文件）")
+
+        for ((p, sha) in toDelete) {
+            // p 是仓库内路径；contentsUrl 会再加一次 root，这里直接拼 URL
+            val req = headers().url("$api/$p")
+                .delete(JSONObject().put("message", "FileBridge: 删除目录 $name")
+                    .put("sha", sha).put("branch", branch)
+                    .toString().toRequestBody(jsonMedia)).build()
+            call(req)
+        }
+        DevLog.i("GH", "删除目录 /$rel · ${found.size} 个文件")
+        found.size
+    }
+
+    /** 同步读，仅供 deleteFolder 在 io{} 内使用 */
+    private fun readBytesSync(rel: String): ByteArray {
+        val j = getRaw(rel) ?: return ByteArray(0)
+        val content = j.optString("content").replace("\n", "").replace("\r", "")
+        if (content.isNotEmpty()) return android.util.Base64.decode(content, android.util.Base64.DEFAULT)
+        val sha = j.optString("sha")
+        val req = headers()
+            .url("https://api.github.com/repos/$owner/$repo/git/blobs/$sha").get().build()
+        val b = call(req) ?: return ByteArray(0)
+        val c = b.optString("content").replace("\n", "").replace("\r", "")
+        return android.util.Base64.decode(c, android.util.Base64.DEFAULT)
+    }
+
     suspend fun trash(): List<TrashItem> = io {
         if (token.isBlank()) return@io emptyList()
         val req = headers().url(contentsUrl(joinRel(".trash", ""))).get().build()
@@ -297,10 +397,22 @@ class GitHubStore(
         val meta = JSONObject(readText(joinRel(".trash", metaName)))
         val rel = meta.optString("rel")
         val name = meta.optString("name")
-        val tFile = joinRel(".trash", key)
-        val bytes = try { readBytes(tFile) } catch (_: Exception) { ByteArray(0) }
-        put(rel, bytes, "FileBridge: 恢复 $name")
-        deleteRaw(tFile, "FileBridge: 恢复清理 $tFile")
+        val fa = meta.optJSONArray("files")
+        if (fa != null) {
+            // 整目录恢复：逐文件写回
+            for (i in 0 until fa.length()) {
+                val o = fa.getJSONObject(i)
+                val r = o.optString("rel")
+                val c = o.optString("content")
+                val bytes = android.util.Base64.decode(c, android.util.Base64.DEFAULT)
+                put(r, bytes, "FileBridge: 恢复目录 $name")
+            }
+        } else {
+            val tFile = joinRel(".trash", key)
+            val bytes = try { readBytes(tFile) } catch (_: Exception) { ByteArray(0) }
+            put(rel, bytes, "FileBridge: 恢复 $name")
+            deleteRaw(tFile, "FileBridge: 恢复清理 $tFile")
+        }
         deleteRaw(joinRel(".trash", metaName), "FileBridge: 恢复清理元信息")
         DevLog.i("GH", "从回收站恢复 /$rel")
     }
