@@ -42,15 +42,18 @@ OWNER = os.getenv("FB_MIRROR_OWNER", "zjh1934")
 REPO = os.getenv("FB_MIRROR_REPO", "filebridge-persistent")
 BRANCH = os.getenv("FB_MIRROR_BRANCH", "main")
 LOCAL = Path(os.getenv("FB_PERSISTENT_DIR", "/data/user_persistent_data")).resolve()
-STATE = LOCAL / ".filebridge_sync_state.json"
+STATE = LOCAL / ".filebridge_sync_state.json"        # 只记「已确认同步」的基准
+SCAN_CACHE = LOCAL / ".filebridge_scan_cache.json"   # 只记扫描加速用的 sha，不是同步状态
 CONFLICTS = Path(os.getenv("FB_CONFLICT_DIR", "/data/workspace/conflicts"))
 TOKEN = os.getenv("FILEBRIDGE_GH_TOKEN", "").strip()
 
-EXCLUDE_TOP = {".filebridge_sync_state.json"}     # 同步状态自身不进镜像
+EXCLUDE_TOP = {".filebridge_sync_state.json", ".filebridge_scan_cache.json"}  # 内部状态不进镜像
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 300                                       # 每批 tree 条目数
-UPLOAD_WORKERS = 16                               # 并发上传，1 GB 全量不能串行
+UPLOAD_WORKERS = 8                                # 并发上传（太高易触发 secondary limit）
+RATE_GATE = threading.Event()                     # core 用尽时只让一个线程等待
+RATE_GATE.set()
 BLOB_CACHE = Path(os.getenv("FB_BLOB_CACHE", "/data/workspace/.persistent_blob_cache.json"))
 
 # 每线程一个长连接 Session：避免每个 blob 都重新 TLS 握手（之前慢的主因之一）
@@ -92,12 +95,19 @@ def api(method: str, path: str, *, params=None, body=None, allow_404=False, time
             or (resp.status_code == 409 and "git repository is empty" in resp.text.lower())
         ):
             return None
-        # core 限额用尽时，直接等到 reset，而不是短重试后放弃
-        if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+        # core 限额用尽 / 快用尽：只让一个线程真正等待，其余等广播，避免 8 个线程刷屏
+        rem = resp.headers.get("X-RateLimit-Remaining")
+        low = rem is not None and rem.isdigit() and int(rem) < 80
+        if (resp.status_code == 403 and rem == "0") or low:
             reset = int(resp.headers.get("X-RateLimit-Reset", "0") or "0")
-            wait = max(10, reset - int(time.time()) + 10)
-            print(f"[rate-limit] core 用尽，等待重置 {wait}s", flush=True)
-            time.sleep(min(wait, 3600))
+            wait = max(10, reset - int(time.time()) + 15)
+            if RATE_GATE.is_set():
+                RATE_GATE.clear()
+                print(f"[rate-limit] 配额不足(remaining={rem})，等待重置 {wait}s", flush=True)
+                time.sleep(min(wait, 3600))
+                RATE_GATE.set()
+            else:
+                RATE_GATE.wait(timeout=min(wait + 30, 3660))
             continue
         low = resp.text.lower()
         if resp.status_code in (403, 429) and (
@@ -160,12 +170,55 @@ def load_state() -> dict:
         return {}
 
 
-def save_state(info: dict):
-    STATE.write_text(
-        json.dumps({"files": info, "updated": time.time(), "repo": f"{OWNER}/{REPO}"},
-                   ensure_ascii=False),
-        "utf-8",
-    )
+def load_meta() -> dict:
+    """整份状态（含分组进度）。兼容只有 files 字段的旧格式。"""
+    if not STATE.exists():
+        return {"files": {}, "groups": {}}
+    try:
+        d = json.loads(STATE.read_text("utf-8"))
+        d.setdefault("files", {})
+        d.setdefault("groups", {})
+        return d
+    except Exception:
+        return {"files": {}, "groups": {}}
+
+
+def load_scan_cache() -> dict:
+    try:
+        return json.loads(SCAN_CACHE.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def save_scan_cache(info: dict):
+    """本地现状只是扫描加速缓存，绝不能当成「已同步基准」。"""
+    try:
+        SCAN_CACHE.write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
+def save_state(confirmed: dict, groups: dict | None = None):
+    """每批提交后调用一次，中途停掉也不丢进度。
+    confirmed 必须是「远端已经确认收到」的文件，不能传本地扫描结果。
+    """
+    meta = load_meta()
+    meta["files"] = confirmed
+    if groups is not None:
+        meta["groups"] = groups
+    meta["updated"] = time.time()
+    meta["repo"] = f"{OWNER}/{REPO}"
+    STATE.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
+
+
+def group_of(rel: str) -> str:
+    """顶层目录即一个「项目」；根下散文件归到 _root。"""
+    parts = Path(rel).parts
+    return parts[0] if len(parts) > 1 else "_root"
+
+
+def belongs(rel: str, group: str | None) -> bool:
+    return group is None or group == "all" or group_of(rel) == group
 
 
 def local_scan(state: dict):
@@ -251,7 +304,7 @@ def pull_file(rel: str, sha: str, info: dict):
     info[rel] = {"sha": blob_sha(data), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
-def flush(entries, parent, tree_sha):
+def flush(entries, parent, tree_sha, label: str = "全量增量"):
     if not entries:
         return parent, tree_sha
     payload = {"tree": entries}
@@ -259,7 +312,7 @@ def flush(entries, parent, tree_sha):
         payload["base_tree"] = tree_sha
     t = api("POST", "/git/trees", body=payload)
     c = api("POST", "/git/commits", body={
-        "message": "FileBridge: 同步跨对话持久区 [skip ci]",
+        "message": f"FileBridge: 同步持久区 [{label}] [skip ci]",
         "tree": t["sha"],
         "parents": [parent] if parent else [],
     })
@@ -271,8 +324,13 @@ def flush(entries, parent, tree_sha):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("action", nargs="?", default="sync", choices=["sync", "status"])
+    ap = argparse.ArgumentParser(
+        description="持久区 ↔ 私有镜像仓：首次可逐项目同步，后续靠三向比较自动检测变化"
+    )
+    ap.add_argument("action", nargs="?", default="sync",
+                    choices=["sync", "status", "groups"])
+    ap.add_argument("target", nargs="?", default=None,
+                    help="项目名（顶层目录，或 _root）；不填 = 所有项目做增量检测")
     args = ap.parse_args()
 
     if not TOKEN:
@@ -281,15 +339,54 @@ def main() -> int:
     LOCAL.mkdir(parents=True, exist_ok=True)
 
     remote, parent, tree_sha, keeps = remote_snapshot()
-    state = load_state()
-    info, empties = local_scan(state)
-    base = {k: v["sha"] for k, v in state.items()}
+    meta = load_meta()
+    confirmed = dict(meta["files"])          # 已确认同步的基准（不是本地扫描结果）
+    groups_done = meta["groups"]
+    info, empties = local_scan(load_scan_cache())
+    save_scan_cache(info)
+    base = {k: v["sha"] for k, v in confirmed.items()}
     local = {k: v["sha"] for k, v in info.items()}
 
+    # 远端与本地本来就一致的文件也算「已同步」，后续才能正确识别单侧改动
+    for rel in local:
+        if rel in remote and local[rel] == remote[rel]:
+            confirmed[rel] = info[rel]
+
+    # 各项目清单（按体积升序，首次同步先小后大）
+    inventory: dict[str, dict[str, int]] = {}
+    for rel, m in info.items():
+        g = inventory.setdefault(group_of(rel), {"files": 0, "bytes": 0})
+        g["files"] += 1
+        g["bytes"] += m["size"]
+    order = sorted(inventory, key=lambda g: inventory[g]["bytes"])
+
+    if args.action == "groups":
+        print(f"持久区项目清单（共 {len(info)} 文件 / {sum(v['bytes'] for v in inventory.values())/1048576:.1f} MB）")
+        print(f"{'项目':<14}{'文件':>8}{'大小':>12}   首次同步")
+        for g in order:
+            v = inventory[g]
+            done = "已完成" if groups_done.get(g, {}).get("done") else "待同步"
+            print(f"{g:<14}{v['files']:>8}{v['bytes']/1048576:>10.1f} MB   {done}")
+        print("\n逐个跑： python3 sync_persistent.py sync <项目>")
+        print("之后只需： python3 sync_persistent.py sync   （自动检测所有变化）")
+        return 0
+
+    group = args.target
+    if group and group != "all" and group not in inventory:
+        print(f"没有这个项目：{group}；可用：{', '.join(order)}", file=sys.stderr)
+        return 3
+    label = group if group and group != "all" else "全量增量"
+
     push, pull, drop_remote, drop_local, conflicts = decide(base, local, remote)
-    total_local = len(local)
-    print(f"[state] 本地 {total_local} 文件 / 远端 {len(remote)} 文件 / 空目录 {len(empties)}")
-    print(f"[plan] 上传 {len(push)} · 回灌 {len(pull)} · 删远端 {len(drop_remote)}"
+    # 逐项目：只处理属于该组的条目，其余留到下一轮
+    push = [r for r in push if belongs(r, group)]
+    pull = [r for r in pull if belongs(r, group)]
+    drop_remote = [r for r in drop_remote if belongs(r, group)]
+    drop_local = [r for r in drop_local if belongs(r, group)]
+    conflicts = [r for r in conflicts if belongs(r, group)]
+
+    print(f"[state] 本地 {len(local)} 文件 / 远端 {len(remote)} 文件 / 空目录 {len(empties)}")
+    print(f"[plan:{label}] 上传 {len(push)} · 回灌 {len(pull)} · 删远端 {len(drop_remote)}"
           f" · 删本地 {len(drop_local)} · 冲突 {len(conflicts)}")
     if args.action == "status":
         return 0
@@ -304,24 +401,23 @@ def main() -> int:
     for i, rel in enumerate(pull, 1):
         if rel in remote:
             pull_file(rel, remote[rel], info)
+            confirmed[rel] = info[rel]
         if i % 100 == 0:
             print(f"[pull] {i}/{len(pull)}", flush=True)
 
     # 远端删除 → 本地删除
     for rel in drop_local:
-        p = LOCAL / rel
-        if safe_rel(rel) and p.is_file():
-            p.unlink()
+        fg = LOCAL / rel
+        if safe_rel(rel) and fg.is_file():
+            fg.unlink()
         info.pop(rel, None)
 
     # 远端 .gitkeep 对应的空目录，本地也建出来（不落地 .gitkeep 文件）
     for k in keeps:
         d = k[:-len(GITKEEP)].rstrip("/")
-        if d and safe_rel(d):
+        if d and safe_rel(d) and belongs(d, group):
             (LOCAL / d).mkdir(parents=True, exist_ok=True)
 
-    # 构造 tree 条目
-    # 已创建的 blob 缓存：中途重启也不重复上传相同内容
     known = set(remote.values())
     try:
         known |= set(json.loads(BLOB_CACHE.read_text("utf-8")))
@@ -332,7 +428,7 @@ def main() -> int:
 
     # 空目录占位：本地空目录 → 远端补 .gitkeep；本地不再空 → 删掉多余 .gitkeep
     empty_blob_sha = None
-    want_keeps = {f"{d}/{GITKEEP}" for d in empties if d}
+    want_keeps = {f"{d}/{GITKEEP}" for d in empties if d and belongs(d, group)}
     for rel in sorted(want_keeps - keeps):
         if empty_blob_sha is None:
             empty_blob_sha = api("POST", "/git/blobs",
@@ -341,16 +437,16 @@ def main() -> int:
     local_dirs_with_files = {k.rsplit("/", 1)[0] for k in local if "/" in k}
     for rel in sorted(keeps - want_keeps):
         d = rel[:-len(GITKEEP)].rstrip("/")
-        if d in local_dirs_with_files:
+        if d in local_dirs_with_files and belongs(d, group):
             entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": None})
 
     for rel in drop_remote:
         entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": None})
 
-    # 并发上传：worker 内部才读文件，内存里同时最多只有 UPLOAD_WORKERS 个大文件。
-    # 内容去重靠 known + 锁；每满一批立刻提交，中途限流/断网不丢已同步的部分。
+    # 并发上传：worker 内才读文件；每满一批立刻提交并落盘状态，断网也不丢进度
     known_lock = threading.Lock()
-    new_blobs = 0
+    global_new: list[str] = []
+    committed = 0
 
     def upload_one(rel: str):
         if not safe_rel(rel):
@@ -371,47 +467,64 @@ def main() -> int:
         return ({"path": rel, "mode": "100644", "type": "blob", "sha": sha},
                 {"sha": blob_sha(data), "size": len(data), "mtime_ns": st.st_mtime_ns})
 
-    global_new = []
-    with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
-        futures = [ex.submit(upload_one, rel) for rel in push]
-        for i, fut in enumerate(as_completed(futures), 1):
-            r = fut.result()
-            if r is None:
-                continue
-            entry, meta = r
-            entries.append(entry)
-            info[entry["path"]] = meta
-            if len(entries) >= BATCH:
-                parent, tree_sha = flush(entries, parent, tree_sha)
-                print(f"[commit] 已提交 {i}/{len(push)} · {parent[:8]}", flush=True)
-                entries = []
-            if i % 200 == 0:
-                if global_new:
-                    try:
-                        old = set(json.loads(BLOB_CACHE.read_text("utf-8"))) if BLOB_CACHE.exists() else set()
-                        BLOB_CACHE.write_text(json.dumps(sorted(old | set(global_new))), "utf-8")
-                    except Exception:
-                        pass
-                    global_new = []
-                print(f"[push] {i}/{len(push)}", flush=True)
-
-    if global_new:
+    def cache_blobs():
+        if not global_new:
+            return
         try:
             old = set(json.loads(BLOB_CACHE.read_text("utf-8"))) if BLOB_CACHE.exists() else set()
             BLOB_CACHE.write_text(json.dumps(sorted(old | set(global_new))), "utf-8")
         except Exception:
             pass
+        global_new.clear()
 
-    # 收尾：不足一批的条目
+    with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
+        futures = [ex.submit(upload_one, rel) for rel in push]
+        for i, fut in enumerate(as_completed(futures), 1):
+            res = fut.result()
+            if res is None:
+                continue
+            entry, item = res
+            entries.append(entry)
+            info[entry["path"]] = item
+            confirmed[entry["path"]] = item              # 只有提交成功才算已同步
+            if len(entries) >= BATCH:
+                parent, tree_sha = flush(entries, parent, tree_sha, label)
+                committed += 1
+                save_state(confirmed, groups_done)      # 每批落盘，可随时中断重跑
+                print(f"[commit] {label} · {i}/{len(push)} · {parent[:8]}", flush=True)
+                entries = []
+            if i % 200 == 0:
+                cache_blobs()
+                print(f"[push] {i}/{len(push)}", flush=True)
+
+    cache_blobs()
+
     if entries:
-        parent, tree_sha = flush(entries, parent, tree_sha)
-        print(f"[commit] 收尾 {len(entries)} 条 · {parent[:8]}", flush=True)
+        parent, tree_sha = flush(entries, parent, tree_sha, label)
+        committed += 1
+        print(f"[commit] {label} · 收尾 {len(entries)} 条 · {parent[:8]}", flush=True)
         entries = []
 
-    save_state(info)
-    print(f"[done] 同步完成 · 本地 {len(info)} 文件 · "
-          f"上传 {len(push)} · 回灌 {len(pull)} · 冲突 {len(conflicts)} · "
-          f"空目录占位 {len(want_keeps)}")
+    # 标记该组首次同步完成，后续 sync 不带项目名就自动做全量增量检测
+    if group and group != "all":
+        groups_done[group] = {
+            "done": True,
+            "files": inventory[group]["files"],
+            "bytes": inventory[group]["bytes"],
+            "at": time.time(),
+        }
+    save_state(confirmed, groups_done)
+    save_scan_cache(info)
+
+    print(f"[done:{label}] 提交 {committed} 次 · 上传 {len(push)} · 回灌 {len(pull)}"
+          f" · 冲突 {len(conflicts)} · 空目录占位 {len(want_keeps)}")
+    if group and group != "all":
+        rest = [g for g in order if not groups_done.get(g, {}).get("done")]
+        print(f"[next] 剩余项目: {', '.join(rest) if rest else '无，全部完成'}"
+              f"  → python3 sync_persistent.py sync {rest[0] if rest else ''}".rstrip())
+    else:
+        done = sum(1 for g in order if groups_done.get(g, {}).get("done"))
+        print(f"[incremental] 已完成首次同步的项目 {done}/{len(order)}；本次只处理检测到的差异")
     print(f"[done] 镜像仓 https://github.com/{OWNER}/{REPO}/tree/{BRANCH}")
     return 0
 

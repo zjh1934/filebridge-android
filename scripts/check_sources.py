@@ -153,6 +153,8 @@ def t_persistent_sync():
     for kw in ["def remote_snapshot(", "def local_scan(", "def decide(",
                "def blob_sha(", "def flush(", "def pull_file(", "def backup_local(",
                "base_tree", "BATCH = 300", "UPLOAD_WORKERS", "ThreadPoolExecutor", "rate-limit",
+               "def group_of(", "def belongs(", "\"groups\"", "groups_done",
+               "SCAN_CACHE", "confirmed",
                "GITKEEP", ".filebridge_sync_state.json", "EXCLUDE_TOP",
                "truncated", "safe_rel(", "retry"]:
         assert kw in s, f"sync_persistent.py 缺少 {kw}"

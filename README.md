@@ -76,9 +76,31 @@ GitHub **不能**当常驻网关（Pages 只发静态页，Actions 跑完就销�
 ```bash
 export FILEBRIDGE_GH_TOKEN='你的令牌'
 
-python3 scripts/sync_persistent.py status   # 只比较，不改动
-python3 scripts/sync_persistent.py sync     # 双向增量同步
+python3 scripts/sync_persistent.py groups          # 列出各项目与首次同步进度
+python3 scripts/sync_persistent.py sync _root      # 首次：一个项目一个项目来
+python3 scripts/sync_persistent.py sync filebridge
+python3 scripts/sync_persistent.py sync 听本
+python3 scripts/sync_persistent.py sync 林晚
+python3 scripts/sync_persistent.py sync lovers
+
+python3 scripts/sync_persistent.py status          # 只看差异，不改动
+python3 scripts/sync_persistent.py sync            # 之后：自动检测所有项目的变化
 ```
+
+**首次按项目分批**（约 1 GB / 5700 文件，别一次硬推），每组独立提交、每批 300 条落一个 commit，
+状态每批写盘，中断后重跑自动接着走。项目清单按体积升序，先小后大：
+
+| 项目 | 文件 | 大小 |
+| --- | --- | --- |
+| `_root` | 1 | 0.0 MB |
+| `filebridge` | 10 | 0.0 MB |
+| `听本` | 4611 | 61.8 MB |
+| `林晚` | 255 | 86.4 MB |
+| `lovers` | 816 | 874.0 MB |
+
+**首次跑完后就不用再管分组了**：以后只执行 `python3 scripts/sync_persistent.py sync`，
+脚本用三向比较自动检测哪边变了 —— 沙盒里改了就上传，手机上改了就回灌，两边都改以手机为准并备份本地版本。
+跟我一句「同步持久区」我就跑；我改完持久区文件也会主动跑一次。
 
 设计要点：
 
