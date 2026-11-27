@@ -34,7 +34,9 @@ REQUIRED = [
     "android/app/src/main/res/xml/file_paths.xml",
     "android/app/src/main/res/values/styles.xml",
     "android/app/src/main/java/com/example/filebridge/GitHubStore.kt",
+    "android/app/src/main/java/com/example/filebridge/Models.kt",
     "android/app/src/main/java/com/example/filebridge/Theme.kt",
+    "LICENSE",
     "android/app/src/main/java/com/example/filebridge/DevLog.kt",
     "android/app/src/main/java/com/example/filebridge/MainActivity.kt",
 ]
@@ -137,7 +139,11 @@ def t_slim():
     main = code_only((ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8"))
     for kw in ["LocalStore", "FileRepository", "ApiClient", "mode ==", "云网关"]:
         assert kw not in main, f"MainActivity 仍引用旧模式 {kw}"
-    return "4 个残留文件已删、冗余依赖已清、界面只剩单一沙盒模式"
+    models = code_only((ROOT / "android/app/src/main/java/com/example/filebridge/Models.kt").read_text("utf-8"))
+    for kw in ["data class FileItem", "data class ListResp", "data class TrashItem"]:
+        assert kw in models, f"Models.kt 缺少 {kw}"
+    assert "retrofit" not in models.lower(), "Models.kt 不应引入 Retrofit"
+    return "4 个残留文件已删、冗余依赖已清、数据模型独立保留、界面只剩单一沙盒模式"
 
 
 def t_sandbox_default():

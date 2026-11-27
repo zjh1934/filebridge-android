@@ -166,8 +166,8 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun StatBlock(value: String, label: String) {
-    Surface(shape = FB.ShapeCard, color = FB.AccentSoft, modifier = Modifier.weight(1f)) {
+private fun StatBlock(value: String, label: String, modifier: Modifier = Modifier) {
+    Surface(shape = FB.ShapeCard, color = FB.AccentSoft, modifier = modifier) {
         Column(Modifier.padding(14.dp)) {
             Text(text = value, style = MaterialTheme.typography.titleLarge, color = FB.Accent)
             Text(text = label, style = MaterialTheme.typography.bodySmall)
@@ -305,8 +305,8 @@ fun App() {
         try {
             busy = true
             if (token.isBlank()) {
-                dirs = emptyList()
-                files = emptyList()
+                dirs = emptyList<FileItem>()
+                files = emptyList<FileItem>()
                 error = ""
                 busy = false
                 return
@@ -582,8 +582,8 @@ fun App() {
                     }
                 }
 
-                items(dirs) { d -> FolderRow(d) { parent = joinPath(parent, d.name) } }
-                items(files) { f -> FileCard(f) { actionItem = f } }
+                items(dirs) { d: FileItem -> FolderRow(d) { parent = joinPath(parent, d.name) } }
+                items(files) { f: FileItem -> FileCard(f) { actionItem = f } }
 
                 if (token.isNotBlank() && error.isEmpty() && dirs.isEmpty() && files.isEmpty() && !busy) {
                     item {
@@ -633,7 +633,7 @@ fun App() {
         }
     }
 
-    actionItem?.let { f ->
+    actionItem?.let { f: FileItem ->
         ModalBottomSheet(
             onDismissRequest = { actionItem = null },
             containerColor = FB.Surface,
@@ -714,7 +714,7 @@ fun App() {
     }
 
     // ------------------------------------------------------------ 编辑
-    editItem?.let { target ->
+    editItem?.let { target: FileItem ->
         AlertDialog(
             onDismissRequest = { editItem = null },
             title = { SectionTitle("编辑 · ${target.name}") },
@@ -745,7 +745,7 @@ fun App() {
     }
 
     // ------------------------------------------------------------ 删除
-    confirmDel?.let { target ->
+    confirmDel?.let { target: FileItem ->
         AlertDialog(
             onDismissRequest = { confirmDel = null },
             title = { SectionTitle("把「${target.name}」移到回收站？") },
@@ -769,7 +769,7 @@ fun App() {
     }
 
     // ------------------------------------------------------------ 改名
-    renameItem?.let { target ->
+    renameItem?.let { target: FileItem ->
         AlertDialog(
             onDismissRequest = { renameItem = null },
             title = { SectionTitle("改成什么名字？") },
@@ -861,9 +861,9 @@ fun App() {
                     Spacer(Modifier.height(14.dp))
                     val s = logSummary
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        StatBlock("${s?.total ?: 0} 条", "本次记录")
-                        StatBlock("${s?.errors ?: 0} 个", "错误")
-                        StatBlock("${s?.httpFailed ?: 0} 次", "请求失败")
+                        StatBlock("${s?.total ?: 0} 条", "本次记录", Modifier.weight(1f))
+                        StatBlock("${s?.errors ?: 0} 个", "错误", Modifier.weight(1f))
+                        StatBlock("${s?.httpFailed ?: 0} 次", "请求失败", Modifier.weight(1f))
                     }
                     Spacer(Modifier.height(14.dp))
                     s?.last?.take(4)?.forEach {
@@ -926,7 +926,7 @@ fun App() {
                         Text(text = "这里还是空的。删掉的文件会先放在这儿。",
                             style = MaterialTheme.typography.bodyMedium)
                     }
-                    trashItems.forEach { t ->
+                    trashItems.forEach { t: TrashItem ->
                         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Text(text = t.name, style = MaterialTheme.typography.titleMedium,

@@ -111,6 +111,7 @@ filebridge/
 ├── sandbox-files/                 # ★ 中转目录（推到仓库同名目录）
 ├── android/app/src/main/java/com/example/filebridge/
 │   ├── GitHubStore.kt             # ★ GitHub Contents API 后端（唯一数据源）
+│   ├── Models.kt                  # 共用的纯 Kotlin 数据模型（无网络库依赖）
 │   ├── Theme.kt                   # ★ 设计系统：颜色 / 字阶 / 形状 token
 │   ├── DevLog.kt                  # 日志采集 / 脱敏 / MD 导出
 │   └── MainActivity.kt            # 单模式界面
