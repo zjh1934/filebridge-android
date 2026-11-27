@@ -4,9 +4,9 @@
 > 它只做一件事：让你在手机上**看到沙盒里的文件、打开、编辑、保存、删除**，改完还能回到沙盒。
 
 - **源码仓库**：https://github.com/zjh1934/filebridge-android
-- **最新安装包**：https://github.com/zjh1934/filebridge-android/releases/tag/v1.3
+- **最新安装包**：https://github.com/zjh1934/filebridge-android/releases/tag/v1.4
 - **签名**：v1.1 起固定同一张证书，后续版本直接覆盖安装
-- **版本规则**：`FileBridge-v1.3.apk` → v1.4 → v1.5 …，每出一次包 +0.1
+- **版本规则**：`FileBridge-v1.4.apk` → v1.5 → v1.6 …，每出一次包 +0.1
 - APP 内置**一键导出 Markdown 开发者日志**
 
 ---
@@ -28,7 +28,7 @@ GitHub **不能**当常驻网关（Pages 只发静态页，Actions 跑完就销�
 GitHub 仓库 zjh1934/filebridge-android 的 sandbox-files/ 目录
      │  手机 APP 通过 Contents API 直接列目录 / 读 / 写 / 删
      ▼
-安卓 APP（v1.3 起只有「沙盒文件」这一件事）
+安卓 APP（只有「沙盒文件」这一件事）
      │  编辑保存 = PUT 回仓库
      ▼
 下次开对话说「同步沙盒文件」→ scripts/pull_from_github.py 回灌持久区
@@ -40,11 +40,11 @@ GitHub 仓库 zjh1934/filebridge-android 的 sandbox-files/ 目录
 
 ## 3. 用户怎么用（就一步）
 
-1. 到 Release 页下载 `FileBridge-v1.3.apk`，安装
-2. 打开 → 首页就是一张「**先连上沙盒**」的卡片 → 把令牌**粘一次** → 点「保存并查看文件」
-3. 完事。之后打开直接看到文件列表，点文件 → 「编辑并保存」→「保存到沙盒」
+1. 到 Release 页下载 `FileBridge-v1.4.apk`，安装
+2. 打开 → 首页「**先连上沙盒**」→ 把令牌**粘一次** → 点「保存并查看文件」
+3. 之后打开直接看到文件列表，点文件 → 「编辑并保存」→「保存到沙盒」
 
-仓库地址、`sandbox-files` 目录、分支全部预置在包里，**不用填 IP、不用配路由器、不用懂网络、不用再填第二次令牌**。顶部「已连接」那个小圆点可以点开改令牌。
+仓库地址、`sandbox-files` 目录、分支全部预置在包里，**不用填 IP、不用配路由器、不用懂网络**。顶部「已连接」小圆点可以点开改令牌。
 
 > 改完想让内容回到沙盒持久区，跟我说一句「同步沙盒文件」。
 
@@ -63,59 +63,57 @@ GitHub 仓库 zjh1934/filebridge-android 的 sandbox-files/ 目录
 
 ---
 
-## 5. v1.3 做了什么
+## 5. v1.4 修了什么（真机日志定位）
 
-**清掉 1.1 残留（用户指出来的包大问题）**
+用户导出的开发者日志显示：15 条网络请求全部 `→ -1 (1ms)`，异常是 **`android.os.NetworkOnMainThreadException`**，堆栈落在 `GitHubStore.call()` → `OkHttp execute()` → `AndroidUiDispatcher`（主线程）。
 
-v1.2 虽然默认改成了沙盒文件，包里还留着 1.1 那套手机本地文件管理器和完全用不上的云网关客户端。v1.3 全删了：
+根因：`GitHubStore` 用 OkHttp **同步** `execute()`，方法虽写成 `suspend`，但没切 `Dispatchers.IO`；`rememberCoroutineScope()` 绑主线程，StrictMode 直接拦截。**suspend 只是标记，不会自动换线程**。所以从 v1.2 起，APP 里所有联网操作一次都没成功过 —— 之前声称的"闭环实测"是 Python 脚本模拟的，CI 编译和 19/19 服务端验证都碰不到这条链路。
 
-| 删除 | 说明 |
+修复：
+
+| 改动 | 说明 |
 | --- | --- |
-| `LocalStore.kt` | 本机文件管理器，整套增删改查 |
-| `Api.kt` / `ApiClient.kt` / `FileRepository.kt` | 云网关客户端 + 三模式分派 |
-| Retrofit / Gson / converter-gson / lifecycle-viewmodel | 不再需要的依赖 |
-| `ui-tooling-preview` | 只在预览用却进了 release |
+| 所有对外方法 `suspend` + `io{}` | `withContext(Dispatchers.IO)` 统一切线程 |
+| `call()` 加主线程断言 | 漏切时报明确文案，不再是 `null` |
+| 嵌套调用收进 IO 块 | `saveText` → `currentSha` → `put` 全程不回主线程 |
+| CI 新增 `Source self-check` | 每次打包前跑线程安全静态断言，防回归 |
 
-实测：**v1.2 6,503,992 B → v1.3 1,581,843 B，小了 75.7%**。
+顺带修了两个小毛病：日志里 `APP 版本 | 0.1 (versionCode 1)` 是**硬编码**，改成从 `PackageInfo` 动态读取；异常 message 为 null 时「没能读到沙盒文件：」后面一片空白，现在有兜底文案。
 
-如实说：6.5 MB 的大头本来是 **Kotlin + Compose + OkHttp 运行时**，光删冗余文件只省约 129 KB。真正把包打下来的是 **Android 官方 R8 代码压缩 + 资源收缩**（`proguard-rules.pro` 保留自己的代码、数据模型和 `FileProvider`），把三方库里没用到的部分压掉。压缩只动未使用代码，不改功能逻辑；CI 编译与签名校验通过。
-
-**UI 重设计（设计依据来自 GitHub）**
-
-- `anthropics/skills` 仓库的 **frontend-design** skill：先定设计 token 再写界面、避开 AI 默认审美（奶油底+衬线、全大写眉标、中点串元数据、所有元素同一圆角的 SaaS 卡片套装）、单点 bold 其余克制、文案用用户语言、错误/空态要给人下一步
-- **Material 3 形状/字阶刻度**：小标签 8 / 卡片 16 / 面板 28 / 按钮全圆角
-- **Now in Android `:core:designsystem`**：颜色、字阶、形状收敛到独立主题文件
-
-落地在 `Theme.kt`：深墨蓝 `#16212B` + 冷纸白 `#F6F8F7` + 单一青绿 `#0F7B6C`，界面里不再散落颜色字面量；不打包自定义字体（会增大 APK），靠系统字族 + 明确字阶字重建立层级。
-
-界面变化：顶部路径面包屑当主视觉、文件卡带类型徽章、六个操作收进底部动作面板、连接引导放到首页、常用入口收成一行 chip、右下角一个「＋ 添加」悬浮按钮。
-
-**功能一个没改**：`GitHubStore.kt`（Contents API 后端）原封不动，列/读/编辑/保存/覆盖/分享/改名/删除/回收站/导入/新建/日志导出全在。
+≥ 验证边界：沙盒无安卓真机，依据是**日志堆栈 + Kotlin 编译 + 14 项静态自检（含线程安全）+ 带令牌的 Contents API 实读**。真机效果需装包点一下刷新确认。
 
 ---
 
-## 6. 目录结构
+## 6. v1.3 做过的事（保留）
+
+**瘦身**：清掉 1.1 残留的 `LocalStore.kt` 本机管理器、云网关客户端和 Retrofit/Gson 依赖；启用 **Android 官方 R8 代码压缩 + 资源收缩**（`proguard-rules.pro` 保留自己的代码、数据模型和 `FileProvider`）。实测 **v1.2 6,503,992 B → v1.3 1,581,843 B，小了 75.7%**。
+
+**UI 重设计**：依据 GitHub 上 `anthropics/skills` 的 **frontend-design** 规约（先定 token 再画界面、避开 AI 默认审美、单点 bold 其余克制、文案用用户语言、错误/空态给下一步），加 Material 3 形状/字阶刻度和 Now in Android `:core:designsystem` 做法。颜色/字阶/圆角集中在 `Theme.kt`；顶部路径面包屑当主视觉、文件卡带类型徽章、操作收进底部动作面板。
+
+---
+
+## 7. 目录结构
 
 ```
 filebridge/
 ├── .github/
-│   ├── workflows/build-apk.yml    # CI：固定签名 + 打包 + 发 Release
+│   ├── workflows/build-apk.yml    # CI：自检 → 固定签名 → 打包 → 发 Release
 │   └── RELEASE_BODY.md            # Release 页面正文
 ├── scripts/
 │   ├── sync_to_github.py          # ★ 沙盒 → 仓库
 │   ├── pull_from_github.py        # ★ 仓库 → 沙盒
 │   ├── verify.py                  # 服务端 19 项端到端验证
-│   ├── check_sources.py           # 源码静态自检
+│   ├── check_sources.py           # 源码静态自检（含线程安全断言）
 │   ├── start_server.sh            # （可选）云网关
 │   └── sync_workspace.py          # （可选）工作区 → 持久区
 ├── server/app.py                  # （可选）文件网关服务
 ├── web/index.html                 # （可选）Web 控制台
 ├── sandbox-files/                 # ★ 中转目录（推到仓库同名目录）
 ├── android/app/src/main/java/com/example/filebridge/
-│   ├── GitHubStore.kt             # ★ GitHub Contents API 后端（唯一数据源）
-│   ├── Models.kt                  # 共用的纯 Kotlin 数据模型（无网络库依赖）
+│   ├── GitHubStore.kt             # ★ Contents API 后端（v1.4 全量切 Dispatchers.IO）
+│   ├── Models.kt                  # 共用的纯 Kotlin 数据模型
 │   ├── Theme.kt                   # ★ 设计系统：颜色 / 字阶 / 形状 token
-│   ├── DevLog.kt                  # 日志采集 / 脱敏 / MD 导出
+│   ├── DevLog.kt                  # 日志采集 / 脱敏 / MD 导出 / 动态版本号
 │   └── MainActivity.kt            # 单模式界面
 ├── VERIFY.md / VERIFY_STATIC.md
 └── README.md
@@ -123,7 +121,7 @@ filebridge/
 
 ---
 
-## 7. 沙盒侧同步命令
+## 8. 沙盒侧同步命令
 
 ```bash
 export FILEBRIDGE_GH_TOKEN='你的令牌'
@@ -132,47 +130,47 @@ python3 scripts/sync_to_github.py      # 沙盒文件推到仓库，手机就能
 python3 scripts/pull_from_github.py    # 手机改动回灌进沙盒持久区
 ```
 
-两个脚本都带 `[skip ci]`，CI 也配了 `paths-ignore: sandbox-files/**`，同步文件不会触发重新打包。闭环已实测：模拟手机编辑 → 写回仓库 → 回灌脚本 → 沙盒持久区收到改动。
+两个脚本都带 `[skip ci]`，CI 也配了 `paths-ignore: sandbox-files/**`，同步文件不会触发重新打包。
 
 ---
 
-## 8. 固定签名与版本规矩
+## 9. 固定签名与版本规矩
 
 - 自签名证书（RSA 2048，30 年）本体**不进公开仓库**，加密存在 Actions Secret `FILEBRIDGE_KEYSTORE_B64`，CI 构建时解码使用；`apksigner verify --print-certs` 每轮校验。
-- applicationId 固定 `com.example.filebridge`，versionCode 递增 → **v1.3 直接覆盖 v1.1/v1.2**，不卸载、不丢数据。
+- applicationId 固定 `com.example.filebridge`，versionCode 递增 → **v1.4 直接覆盖 v1.1/v1.2/v1.3**，不卸载、不丢数据。
 - CI 顶部三行控制一切：
 
 ```yaml
-APP_VERSION: "1.3"
-APK_NAME: "FileBridge-v1.3.apk"
-RELEASE_TAG: "v1.3"
+APP_VERSION: "1.4"
+APK_NAME: "FileBridge-v1.4.apk"
+RELEASE_TAG: "v1.4"
 ```
 
 每出一个版本三行一起 +0.1，`build.gradle.kts` 的 `versionName` 同步、`versionCode` +1。
 
 ---
 
-## 9. 一键导出 Markdown 开发者日志
+## 10. 一键导出 Markdown 开发者日志
 
 「运行日志」chip →「导出 Markdown」/「另存为…」。
 
-记录：生命周期、目录导航、**每次 GitHub 请求的路径/状态码/耗时**、文件读写字节数、异常完整堆栈、设备与系统信息。导出 MD 含导出信息 / 运行摘要 / 最近状态 / 完整时间线 / 网络请求明细 / 异常堆栈。
+记录：生命周期、目录导航、**每次 GitHub 请求的路径/状态码/耗时**、文件读写字节数、异常完整堆栈、设备与系统信息、真实 APP 版本。导出 MD 含导出信息 / 运行摘要 / 最近状态 / 完整时间线 / 网络请求明细 / 异常堆栈。
 
 `sanitize()` 把 `sig=`、`token=`、`x-api-key`、`Bearer`、`ghp_/github_pat_` 一律打码，Token 固定写 `[REDACTED]`。
 
 ---
 
-## 10. 已知限制
+## 11. 已知限制
 
 - **不是实时双向**：手机改完仓库即时生效，回灌沙盒要下次对话跑脚本。
 - Contents API 单文件上限 100 MB，建议放文本 / 文档 / 代码类。
 - 公开仓库 = 中转内容公开，见第 4 节。
-- v1.1 曾做成手机本地文件管理器（方向错），v1.2 改回沙盒但留了残留，v1.3 清干净并重做 UI。
+- 沙盒无安卓真机，UI 与网络行为以真机为准；出问题导日志即可定位。
 - 开发者日志只存本地，不自动上传。
 
 ---
 
-## 11. 跨对话持久性验证
+## 12. 跨对话持久性验证
 
 `scripts/sync_workspace.py --init` 会写 `/data/user_persistent_data/filebridge/CROSS_SESSION_MARKER.txt`。
 下次新开对话让我读这个路径，文件还在、创建时间不变，就说明持久区确实跨对话保留。
