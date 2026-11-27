@@ -8,9 +8,9 @@
 
 - 代码仓（公开）：https://github.com/zjh1934/filebridge-android
 - 数据镜像仓（**私有**）：https://github.com/zjh1934/filebridge-persistent
-- 最新安装包：https://github.com/zjh1934/filebridge-android/releases/tag/v1.6
+- 最新安装包：https://github.com/zjh1934/filebridge-android/releases/tag/v1.7
 - 签名固定：v1.1 起同一张证书，后续版本直接覆盖安装
-- 版本规则：`FileBridge-v1.6.apk` → v1.7 → v1.8 …
+- 版本规则：`FileBridge-v1.7.apk` → v1.8 → v1.9 …
 
 ---
 
@@ -25,7 +25,7 @@
 `lovers`（糖糖）、`听本`、`林晚`、`filebridge`、`_r198_patch.py` 全在，目录结构一一对应。
 
 之前 v1.2～v1.4 只在代码仓里开了个 `sandbox-files/` 小目录塞 5 个文档，方向错了。
-v1.5 改成整个持久区全量镜像并独立仓库；v1.6 把 APP 补齐成能用的文件管理器。
+v1.5 改成整个持久区全量镜像并独立仓库；v1.6 补齐云盘式交互；v1.7 内嵌 MD 编辑器 + 文件/文件夹重命名。
 
 ---
 
@@ -54,7 +54,7 @@ v1.5 改成整个持久区全量镜像并独立仓库；v1.6 把 APP 补齐成�
 
 ---
 
-## 3. v1.6 借鉴了云盘管理器什么
+## 3. 界面借鉴了哪些开源项目
 
 参考了 OpenCloud / ownCloud iOS 客户端的界面元素清单（面包屑、搜索、排序、视图切换、多选开关、三点菜单）、
 Davio / Material Files / Voyager 的文件管理交互，以及 Material 3 关于 **Back（返回历史）与 Up（向上层级）** 的区分。
@@ -75,6 +75,38 @@ Davio / Material Files / Voyager 的文件管理交互，以及 Material 3 关�
 | 轻反馈 | 无 | Toast 提示「已移到回收站（仓库已更新）」「路径已复制」 |
 
 已有的功能一个没动：编辑并保存、覆盖、导入、新建文件/目录、改名、删除（回收站可恢复）、打开、分享、一键导出 Markdown 运行日志、v1.4 的 `Dispatchers.IO` 线程修复。
+
+### 3.1 v1.7：内嵌 Markdown 编辑器
+
+借鉴对象与许可证：
+
+| 项目 | License | 借鉴内容 | 处理方式 |
+| --- | --- | --- | --- |
+| **Markor** `gsantner/markor` | GPL-3.0 | 编辑器结构：顶栏文件名+保存、底部横滚格式化工具栏、编辑/预览双模式、列表自动续行、离开提示保存、切后台自动落盘防丢字；「原生 EditText + Spannable 上色，不用 WebView/CodeMirror」的决策（中文输入/长文滚动/内存更好） | **只借鉴架构与界面，未复制源码**，用 Jetpack Compose 重写，避免 GPL 传染 |
+| **Markwon** `noties/Markwon` | Apache-2.0 | 确认「Markdown → 原生 Spannable、无需 WebView」可行 | 未引入库（会拖进 commonmark-java 撑大包体），高亮/预览自写 |
+| **Material Files** `zhanghai/MaterialFiles` | GPL-3.0+ | 面包屑地址栏、每行右侧 ⋯ 菜单（打开/编辑/**重命名**/详情/删除）、顶部搜索排序、右下 FAB | 只抄结构，代码自己写 |
+
+`MdEditor.kt` 文件头注明了出处。实现要点：
+
+- `VisualTransformation` + `OffsetMapping.Identity` 做语法高亮：**只上色、不改文本长度**，光标选区不错位
+- 高亮覆盖标题 / 引用 / 列表 / 分割线 / 代码块 / 行内代码 / 粗斜体 / 链接
+- 预览用 `mdPreview()` 转 `AnnotatedString`，无 WebView、无第三方解析库
+- 底部工具栏：H1–H3、粗体、斜体、删除线、行内代码、代码块、引用、列表、链接、分割线、表格；支持包裹选区与再点取消
+- **查找替换**（全文高亮 + 匹配数 + 全部替换）、撤销/重做 120 步、列表自动续行
+- **自动草稿**：每次改动异步落到 `filesDir/drafts/`，切后台被杀不丢字，回来顶部可「恢复草稿」
+- 顶部实时字数/行数/未保存圆点；返回键有未保存改动弹「保存并退出 / 放弃 / 继续编辑」
+- 保存到沙盒 = 直接 commit 私有镜像仓
+
+### 3.2 v1.7：重命名（文件 + 文件夹）
+
+之前文件改名藏在动作面板里、文件夹完全没有。现在：
+
+- 文件：动作面板「重命名」；多选选中 1 项时底栏也有「重命名」
+- 文件夹：⋯ 菜单「重命名文件夹」
+
+**为什么文件夹改名要单独设计**：GitHub Contents API 没有目录改名，逐文件 PUT/DELETE 会产生几十次 commit，断网会留半个目录。这里走 Git Data API，一次 `POST /git/trees` 把旧前缀下的 blob **复用 sha 映射到新路径**、旧路径置 `sha:null`，再一个 commit + PATCH ref —— 内容零重传、单次原子提交。配套同名冲突检测、非法字符校验、改名后自动修正当前所在路径。
+
+**同步闭环**：三向比较会把它识别成「删旧 + 加新」，旧路径本地删除、新路径回灌创建。已用临时目录实测：镜像仓改名 → `sync` → 沙盒出现新目录 → 清理 → `verify` 字节一致。
 
 ### 应用名与 Logo
 
@@ -142,7 +174,7 @@ python3 scripts/sync_persistent.py sync 听本        # 只同步某个项目
 
 ## 5. 维护分工（我这边要承担的）
 
-1. **APP**：交互、功能、UI、打包、固定签名、版本递增、Release 发布。
+1. **APP**：交互、功能、UI（含内嵌 MD 编辑器）、打包、固定签名、版本递增、Release 发布。
 2. **同步**：每次对话我改完持久区里的文件会主动跑一次 `sync`；你说「同步持久区」我立刻跑；
    需要更接近实时就用定时任务到点跑。
 3. **校验**：定期跑 `verify`，把「两边是否字节一致」用报告说清楚，不靠嘴说。

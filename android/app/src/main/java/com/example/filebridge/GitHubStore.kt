@@ -277,6 +277,92 @@ class GitHubStore(
             rel = dst, type = "file", size = bytes.size.toLong(), mime = mimeOf(clean))
     }
 
+    /**
+     * 文件夹重命名：GitHub Contents API 没有「目录改名」，逐文件 PUT/DELETE 会产生几十次 commit，
+     * 而且中途断网会留下半个目录。这里走 Git Data API：
+     *   ① 读整棵 tree（recursive）拿到旧前缀下所有 blob 的 sha
+     *   ② 一次 POST /git/trees：新路径复用 sha、旧路径置 null 删除
+     *   ③ 一次 commit + PATCH ref
+     * 内容一个字节都不重传，整次改名是一个原子 commit，同步脚本会识别成「删旧 + 加新」并回灌沙盒。
+     */
+    suspend fun renameFolder(rel: String, newName: String): Int = io {
+        val clean = File(newName.replace('\\', '/')).name
+        require(clean.isNotBlank() && clean != "." && clean != ".." && !clean.contains('/')) {
+            "目录名不合法"
+        }
+        val oldPrefix = pathOf(rel).trim('/')
+        val parentPrefix = oldPrefix.substringBeforeLast('/', "")
+        val newPrefix = if (parentPrefix.isEmpty()) clean else "$parentPrefix/$clean"
+        if (newPrefix == oldPrefix) return@io 0
+
+        val refUrl = "https://api.github.com/repos/$owner/$repo/git/ref/heads/$branch"
+        val head = call(headers().url(refUrl).get().build())
+            ?.optJSONObject("object")?.optString("sha") ?: error("读不到分支 HEAD")
+        val commitObj = call(headers()
+            .url("https://api.github.com/repos/$owner/$repo/git/commits/$head").get().build())
+            ?: error("读不到 HEAD commit")
+        val baseTree = commitObj.optJSONObject("tree")?.optString("sha")
+            ?: error("读不到 tree sha")
+        val treeResp = call(headers().url(
+            "https://api.github.com/repos/$owner/$repo/git/trees/$baseTree?recursive=1")
+            .get().build()) ?: error("读不到目录树")
+        val arr = treeResp.optJSONArray("tree") ?: error("目录树为空")
+
+        val entries = org.json.JSONArray()
+        var moved = 0
+        val existing = mutableSetOf<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("type") == "blob") existing += o.optString("path")
+        }
+        for (p in existing) {
+            if (p.startsWith("$newPrefix/") || p == newPrefix) {
+                error("目标目录「$clean」已经存在，换一个名字")
+            }
+        }
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("type") != "blob") continue
+            val p = o.optString("path")
+            if (p != oldPrefix && !p.startsWith("$oldPrefix/")) continue
+            val suffix = p.removePrefix(oldPrefix)
+            val np = newPrefix + suffix
+            entries.put(org.json.JSONObject()
+                .put("path", np).put("mode", "100644").put("type", "blob")
+                .put("sha", o.optString("sha")))
+            // 必须是 JSON null（JSONObject.NULL），org.json 的 put(key, null) 会把键删掉
+            entries.put(org.json.JSONObject()
+                .put("path", p).put("mode", "100644").put("type", "blob")
+                .put("sha", org.json.JSONObject.NULL))
+            moved++
+        }
+        if (moved == 0) error("目录里没有文件，可能路径不对：/$rel")
+
+        val newTree = call(headers().url(
+            "https://api.github.com/repos/$owner/$repo/git/trees").post(
+            org.json.JSONObject().put("base_tree", baseTree).put("tree", entries)
+                .toString().toRequestBody(jsonMedia)).build())
+            ?.optString("sha") ?: error("创建 tree 失败")
+        val newCommit = call(headers().url(
+            "https://api.github.com/repos/$owner/$repo/git/commits").post(
+            org.json.JSONObject()
+                .put("message", "FileBridge: 目录改名 /$rel → /$newPrefix")
+                .put("tree", newTree)
+                .put("parents", org.json.JSONArray().put(head))
+                .toString().toRequestBody(jsonMedia)).build())
+            ?.optString("sha") ?: error("创建 commit 失败")
+        call(headers().url(refUrl).patch(
+            org.json.JSONObject().put("sha", newCommit).put("force", false)
+                .toString().toRequestBody(jsonMedia)).build())
+        DevLog.i("GH", "目录改名 /$rel → /$newPrefix · $moved 文件 · 单次 commit")
+        moved
+    }
+
+    /** 统一入口：文件走 Contents API，文件夹走 Git Tree API */
+    suspend fun renameAny(rel: String, newName: String, isDir: Boolean) = io {
+        if (isDir) renameFolder(rel, newName) else { rename(rel, newName); 1 }
+    }
+
     private fun deleteRaw(rel: String, message: String) {
         val sha = currentSha(rel) ?: return
         val o = JSONObject().put("message", message).put("sha", sha).put("branch", branch)

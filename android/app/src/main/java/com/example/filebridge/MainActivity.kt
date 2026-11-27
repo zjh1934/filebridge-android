@@ -264,8 +264,8 @@ private fun FileCard(
                     color = FB.AccentSoft,
                     modifier = Modifier.clip(FB.ShapeSmall).clickable(onClick = onAction),
                 ) {
-                    Text(text = "操作", fontSize = 12.sp, color = FB.Accent,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+                    Text(text = "⋯", fontSize = 15.sp, color = FB.Accent,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
                 }
             }
         }
@@ -415,9 +415,28 @@ fun App() {
     var globalHits by remember { mutableStateOf<List<String>>(emptyList()) }
     var globalBusy by remember { mutableStateOf(false) }
     var syncNote by remember { mutableStateOf(true) }
+    // v1.7 内嵌 MD 编辑器 + 重命名
+    var mdItem by remember { mutableStateOf<FileItem?>(null) }
+    var mdText by remember { mutableStateOf("") }
+    var renameBusy by remember { mutableStateOf(false) }
 
     val gh = remember(token) { GitHubStore(ctx, GH_OWNER, GH_REPO, token, GH_ROOT) }
     val scope = rememberCoroutineScope()
+
+    // 内嵌 MD 编辑器是全屏独立页：放在最前面，主界面的返回键与弹窗都不会干扰它
+    mdItem?.let { f ->
+        MdEditorScreen(
+            item = f,
+            initialText = mdText,
+            onSave = { text -> gh.saveText(f.rel, text) },
+            onClose = { mdItem = null },
+            onError = { msg ->
+                Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                DevLog.e("MD", msg)
+            },
+        )
+        return
+    }
 
     fun reportError(msg: String) {
         error = msg
@@ -585,6 +604,17 @@ fun App() {
                             selected = if (selected.size == allShown.size) emptySet()
                                        else allShown.map { it.rel }.toSet()
                         }) { Text("全选") }
+                        if (selected.size == 1) {
+                            TextButton(onClick = {
+                                val t = allShown.firstOrNull { it.rel == selected.first() }
+                                if (t != null) {
+                                    renameItem = t
+                                    renameText = t.name
+                                    selectMode = false
+                                    selected = emptySet()
+                                }
+                            }) { Text("重命名") }
+                        }
                         Button(
                             onClick = { if (selected.isNotEmpty()) confirmBatchDel = true },
                             shape = FB.ShapePill,
@@ -640,8 +670,14 @@ fun App() {
                 }
 
                 Spacer(Modifier.height(18.dp))
+                Surface(
+                    shape = FB.ShapeSmall,
+                    color = FB.Surface,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -662,6 +698,7 @@ fun App() {
                             },
                         )
                     }
+                }
                 }
 
                 Spacer(Modifier.height(10.dp))
@@ -989,6 +1026,11 @@ fun App() {
                     folderAction = null
                     parent = joinPath(parent, d.name)
                 }
+                ActionRow("重命名文件夹", "整目录一次改名，单次 commit，不重传内容") {
+                    folderAction = null
+                    renameItem = d
+                    renameText = d.name
+                }
                 ActionRow("详情", "看完整路径与仓库信息") {
                     folderAction = null
                     infoItem = d
@@ -1143,6 +1185,18 @@ fun App() {
                 Text(text = "${fmtSize(f.size)} · ${shortType(f.name)}",
                     style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
+                ActionRow("内嵌编辑器打开", "Markdown 高亮 / 预览 / 工具栏 / 查找替换 / 自动存草稿") {
+                    actionItem = null
+                    scope.launch {
+                        try {
+                            busy = true
+                            mdText = gh.readText(f.rel)
+                            mdItem = f
+                        } catch (e: Exception) {
+                            reportError("读取失败：${msgOf(e)}")
+                        } finally { busy = false }
+                    }
+                }
                 ActionRow("详情", "看完整路径、大小与仓库里的 sha") {
                     actionItem = null
                     infoItem = f
@@ -1175,7 +1229,7 @@ fun App() {
                         } catch (e: Exception) { reportError("分享失败：${msgOf(e)}") }
                     }
                 }
-                ActionRow("改名", "只改名字，不动内容") {
+                ActionRow("重命名", "只改文件名，不动内容；改完立刻提交仓库") {
                     actionItem = null; renameItem = f; renameText = f.name
                 }
                 ActionRow("移到回收站", "删错了还能在回收站里找回来", danger = true) {
@@ -1270,29 +1324,84 @@ fun App() {
         )
     }
 
-    // ------------------------------------------------------------ 改名
+    // ------------------------------------------------------------ 重命名（文件 + 文件夹）
     renameItem?.let { target: FileItem ->
+        val isDir = target.type == "dir"
         AlertDialog(
-            onDismissRequest = { renameItem = null },
-            title = { SectionTitle("改成什么名字？") },
+            onDismissRequest = { if (!renameBusy) renameItem = null },
+            title = { SectionTitle(if (isDir) "重命名文件夹" else "重命名文件") },
             text = {
-                OutlinedTextField(value = renameText, onValueChange = { renameText = it },
-                    modifier = Modifier.fillMaxWidth(), shape = FB.ShapeSmall, singleLine = true)
+                Column {
+                    Text(
+                        text = if (isDir)
+                            "整目录一次改名：走 Git Data API 单次 commit，里面所有文件路径跟着变，内容一个字节都不重传。同步脚本会识别成「删旧 + 加新」，自动回灌到沙盒持久区。"
+                        else
+                            "只改文件名，不动内容。改完立刻提交到私有镜像仓。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        label = { Text("新名称") },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = FB.ShapeSmall,
+                        singleLine = true,
+                        enabled = !renameBusy,
+                    )
+                    if (isDir) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(text = "原名：/${target.rel}",
+                            style = MaterialTheme.typography.bodySmall, color = FB.Slate)
+                    }
+                }
             },
             confirmButton = {
-                Button(onClick = {
-                    scope.launch {
-                        try {
-                            gh.rename(target.rel, renameText)
+                Button(
+                    enabled = !renameBusy,
+                    onClick = {
+                        val clean = renameText.trim()
+                        if (clean.isEmpty() || clean == "." || clean == ".." ||
+                            clean.contains('/') || clean.contains('\\')) {
+                            reportError("名称不合法：不能为空，也不能带 / 或 \\")
+                            return@Button
+                        }
+                        if (clean == target.name) {
                             renameItem = null
-                            refresh()
-                        } catch (e: Exception) { reportError("改名失败：${msgOf(e)}") }
-                    }
-                }, shape = FB.ShapePill,
-                    colors = ButtonDefaults.buttonColors(containerColor = FB.Accent)
-                ) { Text("保存名字") }
+                            return@Button
+                        }
+                        scope.launch {
+                            renameBusy = true
+                            try {
+                                val moved = gh.renameAny(target.rel, clean, isDir)
+                                val oldRel = target.rel
+                                val newRel = joinPath(oldRel.substringBeforeLast('/', ""), clean)
+                                // 当前正停在被改名的目录里（或其子目录）时，把路径一起换掉
+                                if (parent == oldRel || parent.startsWith("$oldRel/")) {
+                                    parent = newRel + parent.removePrefix(oldRel)
+                                }
+                                renameItem = null
+                                DevLog.i("UI", "重命名 /$oldRel → /$newRel · $moved 项 → 仓库已更新")
+                                Toast.makeText(
+                                    ctx,
+                                    if (isDir) "目录已改名（$moved 个文件）" else "文件名已更新",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                refresh()
+                            } catch (e: Exception) {
+                                reportError("重命名失败：${msgOf(e)}")
+                            } finally {
+                                renameBusy = false
+                            }
+                        }
+                    },
+                    shape = FB.ShapePill,
+                    colors = ButtonDefaults.buttonColors(containerColor = FB.Accent),
+                ) { Text(if (renameBusy) "处理中…" else "保存名字") }
             },
-            dismissButton = { TextButton(onClick = { renameItem = null }) { Text("取消") } },
+            dismissButton = {
+                TextButton(onClick = { if (!renameBusy) renameItem = null }) { Text("取消") }
+            },
         )
     }
 

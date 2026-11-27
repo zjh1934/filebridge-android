@@ -47,6 +47,7 @@ REQUIRED = [
     "android/app/src/main/java/com/example/filebridge/Theme.kt",
     "android/app/src/main/java/com/example/filebridge/DevLog.kt",
     "android/app/src/main/java/com/example/filebridge/MainActivity.kt",
+    "android/app/src/main/java/com/example/filebridge/MdEditor.kt",
 ]
 
 REMOVED = [
@@ -146,6 +147,9 @@ def t_two_repos():
     assert "private fun contentsUrl(" in g, "缺少仓库根路径 URL 处理"
     assert "suspend fun allPaths()" in g, "缺少全仓路径索引"
     assert "suspend fun deleteFolder(" in g, "缺少整目录删除"
+    assert "suspend fun renameFolder(" in g, "缺少文件夹重命名"
+    assert "suspend fun renameAny(" in g, "缺少统一重命名入口"
+    assert "/git/trees" in g and "JSONObject.NULL" in g, "目录重命名未走 Git Tree API"
     assert '"isDir", true' in g, "目录删除未打包成一条回收站记录"
     d = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
     assert 'GH_MIRROR_REPO = "filebridge-persistent"' in d, "日志未标注镜像仓"
@@ -247,7 +251,8 @@ def t_gh_backend():
     for kw in ["class GitHubStore", "fun list(", "fun readBytes(", "fun put(",
                "fun delete(", "fun deleteFolder(", "fun trash(", "fun restore(",
                "fun purge(", "fun mkdir(", "fun importFrom(", "fun localFile(",
-               "fun allPaths(", "repos/$owner/$repo/contents", "DevLog.http("]:
+               "fun allPaths(", "fun rename(", "fun renameFolder(", "fun renameAny(",
+               "repos/$owner/$repo/contents", "DevLog.http("]:
         assert kw in s, f"GitHubStore.kt 缺少 {kw}"
     return "Contents API 列/读/写/删/回收站/导入/下载 + 全仓索引/目录删除齐备"
 
@@ -255,7 +260,7 @@ def t_gh_backend():
 def t_features_intact():
     m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
     for kw in ["gh.list(", "gh.readText(", "gh.saveText(", "gh.put(", "gh.importFrom(",
-               "gh.createText(", "gh.mkdir(", "gh.rename(", "gh.delete(",
+               "gh.createText(", "gh.mkdir(", "gh.renameAny(", "gh.delete(",
                "gh.trash(", "gh.restore(", "gh.purge(", "gh.localFile(",
                "viewIntent(", "shareIntent(", "DevLog.exportMarkdown("]:
         assert kw in m, f"功能入口丢失: {kw}"
@@ -296,6 +301,39 @@ def t_log_accuracy():
     return "版本号动态读取、镜像仓标注、脱敏/MD 导出齐备"
 
 
+def t_md_editor():
+    """内嵌 MD 编辑器：借鉴出处、语法高亮、预览、工具栏、查找替换、草稿、返回键保护。"""
+    e = (ROOT / "android/app/src/main/java/com/example/filebridge/MdEditor.kt").read_text("utf-8")
+    for kw in ["Markor", "Markwon", "Material Files", "GPL-3.0", "Apache-2.0",
+               "fun mdHighlight(", "fun mdPreview(", "fun MdEditorScreen(",
+               "VisualTransformation", "TransformedText(", "OffsetMapping.Identity",
+               "查找替换", "replaceAll()", "全部替换", "MdHit",
+               "撤销", "重做", "恢复草稿", "draftFile", "writeText(tfv.text)",
+               "列表自动续行", "prefixLine(", "wrap(", "ToolBtn(",
+               "保存到沙盒", "BackHandler(enabled = true)", "exitAsk",
+               "预览", "H1", "表格"]:
+        assert kw in e, f"MdEditor.kt 缺少 {kw}"
+    assert "WebView" in e and "CodeMirror" in e, "未注明不使用 WebView 的决策"
+    m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
+    for kw in ["MdEditorScreen(", "mdItem", "mdText", "gh.saveText(f.rel, text)",
+               "内嵌编辑器打开"]:
+        assert kw in m, f"MainActivity 未接入编辑器: {kw}"
+    return "内嵌 MD 编辑器：高亮/预览/工具栏/查找替换/草稿/撤销/保存，出处与 License 已注明"
+
+
+def t_rename_ui():
+    """文件与文件夹重命名都做成显眼入口，且对话框按 type 分流。"""
+    m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
+    for kw in ["重命名文件夹", "gh.renameAny(target.rel, clean, isDir)",
+               'val isDir = target.type == "dir"', "重命名文件",
+               "parent = newRel + parent.removePrefix(oldRel)",
+               '}) { Text("重命名") }', "renameBusy",
+               "新名称", "整目录一次改名"]:
+        assert kw in m, f"MainActivity 重命名 UI 缺少 {kw}"
+    assert "⋯" in m, "未改成 ⋯ 三点菜单样式"
+    return "文件/文件夹重命名入口齐备，目录改名走单次 commit 且联动当前路径"
+
+
 def t_fixed_signing():
     wf = (ROOT / ".github/workflows/build-apk.yml").read_text("utf-8")
     gradle = (ROOT / "android/app/build.gradle.kts").read_text("utf-8")
@@ -303,7 +341,7 @@ def t_fixed_signing():
                "assembleRelease", "verify --verbose", "--print-certs"]:
         assert kw in wf
     for kw in ['create("fixed")', 'file("filebridge.jks")', "enableV2Signing = true",
-               'versionName = "1.6"', "versionCode = 7",
+               'versionName = "1.7"', "versionCode = 8",
                "isMinifyEnabled = true", "isShrinkResources = true"]:
         assert kw in gradle, f"build.gradle.kts 缺少 {kw}"
     assert not (ROOT / "android/app/filebridge.jks").exists()
@@ -314,13 +352,13 @@ def t_fixed_signing():
 def t_version_rule():
     wf = (ROOT / ".github/workflows/build-apk.yml").read_text("utf-8")
     body = (ROOT / ".github/RELEASE_BODY.md").read_text("utf-8")
-    for kw in ['APP_VERSION: "1.6"', 'APK_NAME: "FileBridge-v1.6.apk"',
-               'RELEASE_TAG: "v1.6"', "Source self-check"]:
+    for kw in ['APP_VERSION: "1.7"', 'APK_NAME: "FileBridge-v1.7.apk"',
+               'RELEASE_TAG: "v1.7"', "Source self-check"]:
         assert kw in wf, f"workflow 缺少 {kw}"
-    for kw in ["FileBridge-v1.6.apk", "filebridge-persistent", "沙盒管理器",
-               "返回键", "verify", "直接覆盖"]:
+    for kw in ["FileBridge-v1.7.apk", "filebridge-persistent", "沙盒管理器",
+               "返回键", "verify", "直接覆盖", "Markor", "内嵌", "重命名文件夹"]:
         assert kw in body, f"RELEASE_BODY 缺少 {kw}"
-    return "v1.6 包名/tag/版本规则固定，可覆盖 v1.1～v1.5"
+    return "v1.7 包名/tag/版本规则固定，可覆盖 v1.1～v1.6"
 
 
 def t_workflow():
@@ -343,16 +381,18 @@ def t_readme():
     s = (ROOT / "README.md").read_text("utf-8")
     for kw in ["沙盒管理器", "跨对话持久区", "zjh1934/filebridge-persistent",
                "私有", "两个仓库", "sync_persistent.py", "v1.6", "三向比较",
-               "verify", "返回键", "云盘", "糖糖", "听本", "隐私边界", "固定签名"]:
+               "verify", "返回键", "云盘", "糖糖", "听本", "隐私边界", "固定签名",
+               "Markor", "MdEditor.kt", "重命名文件夹", "查找替换", "GPL-3.0"]:
         assert kw in s, f"README 缺少 {kw}"
-    return "README 已同步 v1.6：云盘式交互、字节级校验、维护方式与边界"
+    return "README 已同步 v1.7：内嵌编辑器出处、目录重命名设计、维护方式与边界"
 
 
 def main():
     for name, fn in [
         ("必需文件与旧残留", t_required), ("无凭据/私钥泄露", t_no_secrets),
         ("两仓分离与镜像根", t_two_repos), ("全量双向同步脚本", t_persistent_sync),
-        ("v1.6 云盘式交互", t_v16_ui), ("应用名与 Logo", t_branding),
+        ("v1.6 云盘式交互", t_v16_ui), ("v1.7 内嵌 MD 编辑器", t_md_editor),
+        ("v1.7 重命名", t_rename_ui), ("应用名与 Logo", t_branding),
         ("默认持久区镜像", t_sandbox_default), ("UI 设计系统", t_ui_design),
         ("GitHub 中继后端", t_gh_backend), ("核心功能未改坏", t_features_intact),
         ("网络线程安全", t_thread_safety), ("日志准确性", t_log_accuracy),
