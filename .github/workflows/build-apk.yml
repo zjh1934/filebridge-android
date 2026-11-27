@@ -145,7 +145,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "FileBridge v${{ env.APP_VERSION }}"
+          name: "沙盒管理器 v${{ env.APP_VERSION }}"
           body_path: .github/RELEASE_BODY.md
           files: android/${{ env.APK_NAME }}
           draft: false
