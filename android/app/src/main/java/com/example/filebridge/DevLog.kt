@@ -3,6 +3,7 @@ package com.example.filebridge
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
@@ -234,6 +235,23 @@ object DevLog {
     private fun mdEscape(s: String): String =
         s.replace("|", "\\|").replace("\r", " ").replace("\n", " ⏎ ")
 
+    /** 版本信息从安装包本身读取，不再硬编码（之前一直写死 0.1，害排查时误判版本） */
+    private fun appVersion(ctx: Context): String = try {
+        val pm = ctx.packageManager
+        val pi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(ctx.packageName, 0)
+        }
+        val name = pi.versionName ?: "未知"
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pi.longVersionCode
+        else @Suppress("DEPRECATION") pi.versionCode.toLong()
+        "$name (versionCode $code)"
+    } catch (e: Exception) {
+        "读取失败：${e.message ?: e.toString()}"
+    }
+
     /** 生成 Markdown 开发者日志 */
     suspend fun exportMarkdown(ctx: Context): File = withContext(Dispatchers.IO) {
         init(ctx)
@@ -246,6 +264,7 @@ object DevLog {
         val s = summary()
         val cfg = ctx.getSharedPreferences("filebridge", Context.MODE_PRIVATE)
         val base = cfg.getString("base", "(未设置)") ?: "(未设置)"
+        val appVersion = appVersion(ctx)
 
         val b = StringBuilder()
         b.appendLine("# FileBridge 开发者日志")
@@ -259,7 +278,7 @@ object DevLog {
         b.appendLine("| --- | --- |")
         b.appendLine("| 导出时间 | ${fmtFull(System.currentTimeMillis())} |")
         b.appendLine("| 会话开始 | ${fmtFull(sessionStart)} |")
-        b.appendLine("| APP 版本 | 0.1 (versionCode 1) |")
+        b.appendLine("| APP 版本 | ${mdEscape(appVersion)} |")
         b.appendLine("| 设备 | ${mdEscape(deviceInfo())} |")
         b.appendLine("| 服务地址 | `${mdEscape(sanitize(base))}` |")
         b.appendLine("| API Token | `[REDACTED]` |")

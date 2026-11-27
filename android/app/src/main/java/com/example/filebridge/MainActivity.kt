@@ -150,11 +150,18 @@ private fun shareIntent(ctx: Context, f: File): Intent {
     }
 }
 
+/** NetworkOnMainThreadException 等异常的 message 是 null，不兜底就会出现「：」后面一片空白 */
+private fun msgOf(e: Exception): String =
+    e.message?.takeIf { it.isNotBlank() } ?: e.toString()
+
 private fun friendlyError(e: Exception): String {
-    val m = e.message.orEmpty()
+    val m = msgOf(e)
     return when {
+        m.contains("主线程") || m.contains("NetworkOnMainThread") ->
+            "APP 内部调度出错，请升级到最新版本后重试。"
         m.contains("令牌无效") || m.contains("401") -> "令牌已经失效了，重新粘一次就能继续用。"
-        m.contains("failed to connect") || m.contains("Unable to resolve") -> "手机现在连不上 GitHub，检查一下网络再试。"
+        m.contains("failed to connect") || m.contains("Unable to resolve") ||
+            m.contains("timeout", ignoreCase = true) -> "手机现在连不上 GitHub，检查一下网络再试。"
         else -> "没能读到沙盒文件：$m"
     }
 }
@@ -351,7 +358,7 @@ fun App() {
                     }
                     refresh()
                 } catch (e: Exception) {
-                    reportError("导入失败：${e.message}")
+                    reportError("导入失败：${msgOf(e)}")
                     busy = false
                 }
             }
@@ -370,7 +377,7 @@ fun App() {
                 } ?: error("无法打开输出流")
                 DevLog.i("LOG", "开发者日志另存为成功")
             } catch (e: Exception) {
-                reportError("另存为失败：${e.message}")
+                reportError("另存为失败：${msgOf(e)}")
             }
         }
     }
@@ -562,7 +569,7 @@ fun App() {
                                         trashItems = gh.trash()
                                         trashOpen = true
                                     } catch (e: Exception) {
-                                        reportError("回收站读取失败：${e.message}")
+                                        reportError("回收站读取失败：${msgOf(e)}")
                                     }
                                 }
                             },
@@ -650,7 +657,7 @@ fun App() {
                     scope.launch {
                         try {
                             ctx.startActivity(viewIntent(ctx, gh.localFile(f.rel), f.mime))
-                        } catch (e: Exception) { reportError("打开失败：${e.message}") }
+                        } catch (e: Exception) { reportError("打开失败：${msgOf(e)}") }
                     }
                 }
                 ActionRow("编辑并保存", "改完点保存，内容写回沙盒") {
@@ -659,7 +666,7 @@ fun App() {
                         try {
                             editText = gh.readText(f.rel)
                             editItem = f
-                        } catch (e: Exception) { reportError("读取失败：${e.message}") }
+                        } catch (e: Exception) { reportError("读取失败：${msgOf(e)}") }
                     }
                 }
                 ActionRow("用别的文件覆盖", "从手机挑一个文件替换掉它") {
@@ -670,7 +677,7 @@ fun App() {
                     scope.launch {
                         try {
                             ctx.startActivity(shareIntent(ctx, gh.localFile(f.rel)))
-                        } catch (e: Exception) { reportError("分享失败：${e.message}") }
+                        } catch (e: Exception) { reportError("分享失败：${msgOf(e)}") }
                     }
                 }
                 ActionRow("改名", "只改名字，不动内容") {
@@ -734,7 +741,7 @@ fun App() {
                             gh.saveText(target.rel, editText)
                             editItem = null
                             refresh()
-                        } catch (e: Exception) { reportError("保存失败：${e.message}") }
+                        } catch (e: Exception) { reportError("保存失败：${msgOf(e)}") }
                     }
                 }, shape = FB.ShapePill,
                     colors = ButtonDefaults.buttonColors(containerColor = FB.Accent)
@@ -758,7 +765,7 @@ fun App() {
                             gh.delete(target.rel)
                             confirmDel = null
                             refresh()
-                        } catch (e: Exception) { reportError("删除失败：${e.message}") }
+                        } catch (e: Exception) { reportError("删除失败：${msgOf(e)}") }
                     }
                 }, shape = FB.ShapePill,
                     colors = ButtonDefaults.buttonColors(containerColor = FB.Danger)
@@ -784,7 +791,7 @@ fun App() {
                             gh.rename(target.rel, renameText)
                             renameItem = null
                             refresh()
-                        } catch (e: Exception) { reportError("改名失败：${e.message}") }
+                        } catch (e: Exception) { reportError("改名失败：${msgOf(e)}") }
                     }
                 }, shape = FB.ShapePill,
                     colors = ButtonDefaults.buttonColors(containerColor = FB.Accent)
@@ -812,7 +819,7 @@ fun App() {
                             newFileOpen = false
                             newFileName = ""
                             refresh()
-                        } catch (e: Exception) { reportError("创建失败：${e.message}") }
+                        } catch (e: Exception) { reportError("创建失败：${msgOf(e)}") }
                     }
                 }, shape = FB.ShapePill,
                     colors = ButtonDefaults.buttonColors(containerColor = FB.Accent)
@@ -839,7 +846,7 @@ fun App() {
                             newDirOpen = false
                             newDirName = ""
                             refresh()
-                        } catch (e: Exception) { reportError("创建失败：${e.message}") }
+                        } catch (e: Exception) { reportError("创建失败：${msgOf(e)}") }
                     }
                 }, shape = FB.ShapePill,
                     colors = ButtonDefaults.buttonColors(containerColor = FB.Accent)
@@ -886,7 +893,7 @@ fun App() {
                                     exportedPath = f.absolutePath
                                     logSummary = DevLog.summary()
                                     ctx.startActivity(DevLog.shareIntent(ctx, f))
-                                } catch (e: Exception) { reportError("导出失败：${e.message}") }
+                                } catch (e: Exception) { reportError("导出失败：${msgOf(e)}") }
                             }
                         }, shape = FB.ShapePill,
                             colors = ButtonDefaults.buttonColors(containerColor = FB.Accent)
@@ -898,7 +905,7 @@ fun App() {
                                     exportedPath = f.absolutePath
                                     logSummary = DevLog.summary()
                                     saveMd.launch(f.name)
-                                } catch (e: Exception) { reportError("导出失败：${e.message}") }
+                                } catch (e: Exception) { reportError("导出失败：${msgOf(e)}") }
                             }
                         }) { Text("另存为…") }
                     }
@@ -938,7 +945,7 @@ fun App() {
                                         gh.restore(t.id)
                                         trashItems = gh.trash()
                                         refresh()
-                                    } catch (e: Exception) { reportError("恢复失败：${e.message}") }
+                                    } catch (e: Exception) { reportError("恢复失败：${msgOf(e)}") }
                                 }
                             }) { Text("恢复") }
                             TextButton(onClick = {
@@ -946,7 +953,7 @@ fun App() {
                                     try {
                                         gh.purge(t.id)
                                         trashItems = gh.trash()
-                                    } catch (e: Exception) { reportError("删除失败：${e.message}") }
+                                    } catch (e: Exception) { reportError("删除失败：${msgOf(e)}") }
                                 }
                             }) { Text("彻底删", color = FB.Danger) }
                         }

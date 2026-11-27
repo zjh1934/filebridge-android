@@ -216,16 +216,53 @@ def t_relay_scripts():
     return "双向同步脚本 + CI paths-ignore 齐备"
 
 
-def t_devlog():
-    s = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
-    for kw in ["object DevLog", "fun sanitize", "fun exportMarkdown", "fun shareIntent",
+def t_thread_safety():
+    """
+    v1.4 核心修复：NetworkOnMainThreadException 回归防护。
+
+    编译通过不代表网络跑在子线程 —— v1.2/v1.3 就是这么漏过去的：
+    suspend 只是挂名，rememberCoroutineScope() 仍绑主线程，OkHttp 同步 execute() 被 StrictMode 拦下。
+    这里强制：所有非 private 方法必须 suspend + 走 io{}，且 call() 有主线程断言。
+    """
+    s = (ROOT / "android/app/src/main/java/com/example/filebridge/GitHubStore.kt").read_text("utf-8")
+    for kw in ["import kotlinx.coroutines.Dispatchers", "import kotlinx.coroutines.withContext",
+               "import kotlinx.coroutines.CoroutineScope", "import android.os.Looper",
+               "private suspend fun <T> io(", "withContext(Dispatchers.IO, block)",
+               "Looper.getMainLooper()?.thread == Thread.currentThread()",
+               "client.newCall(req).execute()"]:
+        assert kw in s, f"GitHubStore.kt 缺少线程安全要件: {kw}"
+
+    # 不允许任何非 private、非 suspend 的方法（所有网络入口都必须挂起）
+    bad = re.findall(r"^    fun (\w+)\(", s, re.M)
+    assert not bad, f"仍有非 suspend 的非私有方法: {bad}"
+
+    for name in ["list", "put", "readBytes", "readText", "saveText", "createText",
+                 "mkdir", "importFrom", "rename", "delete", "trash", "restore",
+                 "purge", "localFile"]:
+        assert re.search(rf"suspend fun {name}\(", s), f"方法 {name} 未标记 suspend"
+    assert s.count("= io {") >= 10, "io{} 包裹数量不足，疑似有方法漏切线程"
+    # call() 只允许一处 execute，避免散落网络调用绕过 IO
+    assert s.count(".execute()") == 1, "存在未被 io{} 收拢的同步网络调用"
+
+    m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
+    assert "runBlocking" not in m, "不允许用 runBlocking 把网络强行拉回主线程"
+    assert "fun msgOf(" in m and "NetworkOnMainThread" in m, "异常文案兜底缺失"
+    return "全部网络入口 suspend + Dispatchers.IO，call() 有主线程断言，无 runBlocking 绕过"
+
+
+def t_log_accuracy():
+    """日志里的版本号和报错文案必须真实，不能硬编码或留空白。"""
+    d = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
+    assert "0.1 (versionCode 1)" not in d, "版本号仍被硬编码"
+    for kw in ["fun appVersion(", "appVersion(ctx)", "PackageInfoFlags", "longVersionCode",
+               "object DevLog", "fun sanitize", "fun exportMarkdown", "fun shareIntent",
                "fun http(", "stackTraceToString", "devlog.ndjson", "## 6. 异常堆栈"]:
-        assert kw in s, f"DevLog.kt 缺少 {kw}"
+        assert kw in d, f"DevLog.kt 缺少 {kw}"
     m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
     for kw in ["DevLog.init(", "导出 Markdown", "另存为…", "DevLog.clear()"]:
         assert kw in m, f"MainActivity 缺少 {kw}"
     assert "function exportDevLog" in (ROOT / "web/index.html").read_text("utf-8")
-    return "日志采集/脱敏/MD 导出/分享齐备，安卓与 Web 都已接入"
+    return "版本号动态读取、异常文案兜底、脱敏/MD 导出/分享齐备"
 
 
 def t_fixed_signing():
@@ -235,7 +272,7 @@ def t_fixed_signing():
                "assembleRelease", "verify --verbose", "--print-certs"]:
         assert kw in wf, f"workflow 缺少 {kw}"
     for kw in ['create("fixed")', 'file("filebridge.jks")', "enableV2Signing = true",
-               'versionName = "1.3"', "versionCode = 4"]:
+               'versionName = "1.4"', "versionCode = 5"]:
         assert kw in gradle, f"build.gradle.kts 缺少 {kw}"
     assert not (ROOT / "android/app/filebridge.jks").exists(), "私钥不应在仓库里"
     assert "*.jks" in (ROOT / ".gitignore").read_text("utf-8")
@@ -245,12 +282,13 @@ def t_fixed_signing():
 def t_version_rule():
     wf = (ROOT / ".github/workflows/build-apk.yml").read_text("utf-8")
     body = (ROOT / ".github/RELEASE_BODY.md").read_text("utf-8")
-    for kw in ['APP_VERSION: "1.3"', 'APK_NAME: "FileBridge-v1.3.apk"',
-               'RELEASE_TAG: "v1.3"', "assembleRelease", "app-release.apk"]:
+    for kw in ['APP_VERSION: "1.4"', 'APK_NAME: "FileBridge-v1.4.apk"',
+               'RELEASE_TAG: "v1.4"', "assembleRelease", "app-release.apk",
+               "Source self-check"]:
         assert kw in wf, f"workflow 缺少 {kw}"
-    for kw in ["FileBridge-v1.3.apk", "清干净了", "frontend-design", "功能一个没改坏", "覆盖安装"]:
+    for kw in ["FileBridge-v1.4.apk", "NetworkOnMainThreadException", "Dispatchers.IO", "直接覆盖"]:
         assert kw in body, f"RELEASE_BODY 缺少 {kw}"
-    return "v1.3 包名/tag/版本规则固定，可覆盖 v1.1/v1.2"
+    return "v1.4 包名/tag/版本规则固定，CI 含线程安全自检，可覆盖旧版"
 
 
 def t_workflow():
@@ -271,9 +309,10 @@ def t_workflow():
 def t_readme():
     s = (ROOT / "README.md").read_text("utf-8")
     for kw in ["查看和编辑沙盒里的文件", "不是手机本地文件管理器", "frontend-design",
-               "v1.3", "清掉 1.1 残留", "Theme.kt", "隐私边界", "固定签名"]:
+               "v1.4", "NetworkOnMainThreadException", "Dispatchers.IO", "Theme.kt",
+               "隐私边界", "固定签名"]:
         assert kw in s, f"README 缺少 {kw}"
-    return "README 已同步 v1.3：瘦身、UI 依据、用法与边界"
+    return "README 已同步 v1.4：线程修复、瘦身、UI 依据与边界"
 
 
 def main():
@@ -282,8 +321,9 @@ def main():
         ("1.1 残留已清空", t_slim), ("默认沙盒文件模式", t_sandbox_default),
         ("v1.3 UI 设计系统", t_ui_design), ("GitHub 中继后端", t_gh_backend),
         ("核心功能未改坏", t_features_intact), ("双向同步脚本", t_relay_scripts),
-        ("开发者日志", t_devlog), ("固定签名", t_fixed_signing),
-        ("v1.3 版本规则", t_version_rule), ("CI workflow 校验", t_workflow),
+        ("网络线程安全", t_thread_safety), ("日志准确性", t_log_accuracy),
+        ("固定签名", t_fixed_signing),
+        ("v1.4 版本规则", t_version_rule), ("CI workflow 校验", t_workflow),
         ("README 文档校验", t_readme),
     ]:
         check(name, fn)
