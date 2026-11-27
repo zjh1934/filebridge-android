@@ -14,11 +14,11 @@
 - 版本规则：`FileBridge-v1.5.apk` → v1.6 → v1.7 …
 - APP 内置一键导出 Markdown 开发者日志
 
-镜像仓的**仓库根目录 = `/data/user_persistent_data` 根目录**。实测规模：
+镜像仓的**仓库根目录 = `/data/user_persistent_data` 根目录**。实测规模（会随其它对话持续写入而变化）：
 
 ```
-5670 文件 · 690 目录（40 个空目录）· 约 1 GB
-_r198_patch.py / filebridge / lovers(793 文件 867.6 MB) / 听本(4614 文件 61.8 MB) / 林晚(255 文件 86.4 MB)
+约 2200 文件 · 约 1 GB（排除 .git 后）
+_r198_patch.py / filebridge / lovers(约 870 文件 930 MB) / 听本(约 1065 文件) / 林晚(约 290 文件)
 ```
 
 空目录在 Git 里存不住，用 `.gitkeep` 占位保留结构，APP 自动隐藏该占位文件。
