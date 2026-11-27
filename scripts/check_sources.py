@@ -30,6 +30,7 @@ REQUIRED = [
     "server/app.py", "server/__init__.py", "web/index.html",
     "android/settings.gradle.kts", "android/build.gradle.kts",
     "android/gradle.properties", "android/app/build.gradle.kts",
+    "android/app/proguard-rules.pro",
     "android/app/src/main/AndroidManifest.xml",
     "android/app/src/main/res/xml/file_paths.xml",
     "android/app/src/main/res/values/styles.xml",
@@ -136,6 +137,11 @@ def t_slim():
     for kw in ["com.squareup.okhttp3:okhttp", "androidx.compose.material3:material3",
                "kotlinx-coroutines-android"]:
         assert kw in deps, f"build.gradle.kts 缺少必要依赖 {kw}"
+    assert "isMinifyEnabled = true" in gradle and "isShrinkResources = true" in gradle, \
+        "R8 代码/资源压缩未开启"
+    rules = (ROOT / "android/app/proguard-rules.pro").read_text("utf-8")
+    assert "-keep class com.example.filebridge.**" in rules and "FileProvider" in rules, \
+        "R8 保留规则不完整"
     main = code_only((ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8"))
     for kw in ["LocalStore", "FileRepository", "ApiClient", "mode ==", "云网关"]:
         assert kw not in main, f"MainActivity 仍引用旧模式 {kw}"

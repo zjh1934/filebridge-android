@@ -76,7 +76,7 @@ v1.2 虽然默认改成了沙盒文件，包里还留着 1.1 那套手机本地�
 | Retrofit / Gson / converter-gson / lifecycle-viewmodel | 不再需要的依赖 |
 | `ui-tooling-preview` | 只在预览用却进了 release |
 
-如实说：6.5 MB 的大头本来是 **Kotlin + Compose + OkHttp 运行时**，删不掉，所以不会变成几百 KB；但冗余部分确实清掉了，包明显变小。
+如实说：6.5 MB 的大头本来是 **Kotlin + Compose + OkHttp 运行时**，删不掉，所以不会变成几百 KB；光删冗余文件只省约 129 KB。因此这版额外启用了 **Android 官方 R8 代码压缩 + 资源收缩**（`proguard-rules.pro` 保留自己的代码、数据模型和 `FileProvider`），把三方库里没用到的部分也压掉。压缩只动未使用代码，不改功能逻辑。
 
 **UI 重设计（设计依据来自 GitHub）**
 

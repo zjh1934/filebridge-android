@@ -34,7 +34,14 @@ android {
 
     buildTypes {
         getByName("release") {
-            isMinifyEnabled = false
+            // 6.5 MB 的大头是 Kotlin / Compose / OkHttp 运行时，光删冗余文件效果有限；
+            // 启用 Android 官方 R8 压缩未使用代码与资源，规则见 proguard-rules.pro
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android.txt"),
+                "proguard-rules.pro",
+            )
             if (file("filebridge.jks").exists()) {
                 signingConfig = signingConfigs.getByName("fixed")
             }

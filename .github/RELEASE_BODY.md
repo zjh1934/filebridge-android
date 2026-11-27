@@ -13,9 +13,11 @@
 | Retrofit、converter-gson、Gson、lifecycle-viewmodel | 约 1 MB 依赖 |
 | `ui-tooling-preview`（只在预览用，却进了 release） | 一点零碎 |
 
-v1.2 包：**6,503,992 B** → v1.3 明显更小（构建日志里有 `sha256sum` 和体积）。
+v1.2 包：**6,503,992 B** → v1.3 更小（本页附件有实际体积）。
 
-也要如实说一句：6.5 MB 的大头本来就不是 1.1 垃圾，而是 **Kotlin + Jetpack Compose + OkHttp 运行时**，这几样删不掉，所以不会变成几百 KB。但你怀疑的那部分确实在，现在清干净了。
+也要如实说一句：6.5 MB 的大头本来就不是 1.1 垃圾，而是 **Kotlin + Jetpack Compose + OkHttp 运行时**，这几样删不掉，所以不会变成几百 KB。光删冗余文件只省了约 129 KB，所以这版额外启用了 **Android 官方 R8 代码压缩 + 资源收缩**（`isMinifyEnabled` / `isShrinkResources`），规则里保留了自己的全部代码、数据模型和 `FileProvider`，只压缩三方库里没用到的部分。CI 里 `apksigner verify` 与编译全部通过。
+
+> 压缩只动未使用代码，不改任何功能逻辑。真机上万一出现异常，点「运行日志 → 导出 Markdown」把日志发我，日志里带完整堆栈。
 
 ### 二、UI 重新设计
 
