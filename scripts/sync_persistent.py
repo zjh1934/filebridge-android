@@ -48,6 +48,14 @@ CONFLICTS = Path(os.getenv("FB_CONFLICT_DIR", "/data/workspace/conflicts"))
 TOKEN = os.getenv("FILEBRIDGE_GH_TOKEN", "").strip()
 
 EXCLUDE_TOP = {".filebridge_sync_state.json", ".filebridge_scan_cache.json"}  # 内部状态不进镜像
+# 持久区里 听本/tingben/.git 是另一个 Git 仓库的元数据（3547 个对象）。
+# GitHub 的 tree API 把 ".git" 视为非法路径组件，且镜像仓本身就是 Git 仓库，
+# 把内部对象塞进去没有意义 —— 全量镜像时跳过，其它文件一个不少。
+SKIP_COMPONENTS = {".git"}
+
+def skip_rel(rel: str) -> bool:
+    parts = Path(rel).parts
+    return any(c in SKIP_COMPONENTS for c in parts) or rel in EXCLUDE_TOP
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 300                                       # 每批 tree 条目数
@@ -233,10 +241,10 @@ def local_scan(state: dict):
     for p in LOCAL.rglob("*"):
         rel = p.relative_to(LOCAL).as_posix()
         if p.is_dir():
-            if not any(p.iterdir()):
+            if not any(p.iterdir()) and not skip_rel(rel):
                 empties.append(rel)
             continue
-        if rel in EXCLUDE_TOP or p.name == GITKEEP:
+        if skip_rel(rel) or p.name == GITKEEP:
             continue
         st = p.stat()
         prev = state.get(rel)
@@ -384,7 +392,7 @@ def main() -> int:
 
     push, pull, drop_remote, drop_local, conflicts = decide(base, local, remote)
     # 逐项目：只处理属于该组的条目，其余留到下一轮
-    push = [r for r in push if belongs(r, group)]
+    push = [r for r in push if belongs(r, group) and not skip_rel(r)]
     pull = [r for r in pull if belongs(r, group)]
     drop_remote = [r for r in drop_remote if belongs(r, group)]
     drop_local = [r for r in drop_local if belongs(r, group)]
@@ -433,7 +441,8 @@ def main() -> int:
 
     # 空目录占位：本地空目录 → 远端补 .gitkeep；本地不再空 → 删掉多余 .gitkeep
     empty_blob_sha = None
-    want_keeps = {f"{d}/{GITKEEP}" for d in empties if d and belongs(d, group)}
+    want_keeps = {f"{d}/{GITKEEP}" for d in empties
+                  if d and belongs(d, group) and not skip_rel(d)}
     for rel in sorted(want_keeps - keeps):
         if empty_blob_sha is None:
             empty_blob_sha = api("POST", "/git/blobs",
@@ -442,7 +451,7 @@ def main() -> int:
     local_dirs_with_files = {k.rsplit("/", 1)[0] for k in local if "/" in k}
     for rel in sorted(keeps - want_keeps):
         d = rel[:-len(GITKEEP)].rstrip("/")
-        if d in local_dirs_with_files and belongs(d, group):
+        if d in local_dirs_with_files and belongs(d, group) and not skip_rel(d):
             entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": None})
 
     for rel in drop_remote:
@@ -482,33 +491,35 @@ def main() -> int:
             pass
         global_new.clear()
 
-    with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
-        futures = [ex.submit(upload_one, rel) for rel in push]
-        for i, fut in enumerate(as_completed(futures), 1):
-            res = fut.result()
-            if res is None:
-                continue
-            entry, item = res
-            entries.append(entry)
-            info[entry["path"]] = item
-            confirmed[entry["path"]] = item              # 只有提交成功才算已同步
-            if len(entries) >= BATCH:
-                parent, tree_sha = flush(entries, parent, tree_sha, label)
-                committed += 1
-                save_state(confirmed, groups_done)      # 每批落盘，可随时中断重跑
-                print(f"[commit] {label} · {i}/{len(push)} · {parent[:8]}", flush=True)
-                entries = []
-            if i % 200 == 0:
-                cache_blobs()
-                print(f"[push] {i}/{len(push)}", flush=True)
+    # 按批推进：一次只向线程池投 BATCH 个任务，处理完立刻提交并落盘。
+    # 之前一次性投 4000+ 个 future，任何一个 worker 遇限流 sleep 就会把整批拖住。
+    total = len(push)
+    for start in range(0, total, BATCH):
+        batch = push[start:start + BATCH]
+        batch_entries = list(entries) if start == 0 else []   # 占位/删除条目并入首批
+        entries = [] if start == 0 else entries
+
+        with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
+            futures = [ex.submit(upload_one, rel) for rel in batch]
+            for fut in as_completed(futures):
+                res = fut.result()
+                if res is None:
+                    continue
+                entry, item = res
+                batch_entries.append(entry)
+                info[entry["path"]] = item
+                confirmed[entry["path"]] = item
+
+        if not batch_entries:
+            continue
+        parent, tree_sha = flush(batch_entries, parent, tree_sha, label)
+        committed += 1
+        save_state(confirmed, groups_done)      # 每批落盘，随时可中断重跑
+        cache_blobs()
+        print(f"[commit] {label} · {min(start + BATCH, total)}/{total}"
+              f" · {len(batch_entries)} 条 · {parent[:8]}", flush=True)
 
     cache_blobs()
-
-    if entries:
-        parent, tree_sha = flush(entries, parent, tree_sha, label)
-        committed += 1
-        print(f"[commit] {label} · 收尾 {len(entries)} 条 · {parent[:8]}", flush=True)
-        entries = []
 
     # 标记该组首次同步完成，后续 sync 不带项目名就自动做全量增量检测
     if group and group != "all":

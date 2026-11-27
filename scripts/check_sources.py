@@ -156,6 +156,7 @@ def t_persistent_sync():
                "def group_of(", "def belongs(", "\"groups\"", "groups_done",
                "SCAN_CACHE", "confirmed", "BLOB_SPACING", "def api(",
                "GITKEEP", ".filebridge_sync_state.json", "EXCLUDE_TOP",
+               "SKIP_COMPONENTS", "def skip_rel(",
                "truncated", "safe_rel(", "retry"]:
         assert kw in s, f"sync_persistent.py 缺少 {kw}"
     assert "ghp_" not in s and "FILEBRIDGE_GH_TOKEN" in s, "令牌不应硬编码"
