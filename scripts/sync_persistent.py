@@ -51,9 +51,12 @@ EXCLUDE_TOP = {".filebridge_sync_state.json", ".filebridge_scan_cache.json"}  # 
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 300                                       # 每批 tree 条目数
-UPLOAD_WORKERS = 8                                # 并发上传（太高易触发 secondary limit）
-RATE_GATE = threading.Event()                     # core 用尽时只让一个线程等待
+UPLOAD_WORKERS = 2                                # 写操作太猛会撞 secondary rate limit
+RATE_GATE = threading.Event()                     # 限额时只让一个线程等待
 RATE_GATE.set()
+BLOB_SPACING = 0.35                               # 全局最小间隔（秒），温和推进
+_BLOB_LOCK = threading.Lock()
+_last_blob = [0.0]
 BLOB_CACHE = Path(os.getenv("FB_BLOB_CACHE", "/data/workspace/.persistent_blob_cache.json"))
 
 # 每线程一个长连接 Session：避免每个 blob 都重新 TLS 握手（之前慢的主因之一）
@@ -79,7 +82,15 @@ def api(method: str, path: str, *, params=None, body=None, allow_404=False, time
     hdr = dict(H)
     if TOKEN:
         hdr["Authorization"] = f"Bearer {TOKEN}"
-    for attempt in range(6):
+    # 创建 blob 全局限速：宁可慢，也不要触发反爬式的写限额
+    if method == "POST" and "/git/blobs" in path:
+        with _BLOB_LOCK:
+            dt = time.time() - _last_blob[0]
+            if dt < BLOB_SPACING:
+                time.sleep(BLOB_SPACING - dt)
+            _last_blob[0] = time.time()
+
+    for attempt in range(8):
         try:
             resp = http_session().request(method, url, headers=hdr, params=params,
                                           json=body, timeout=timeout)
@@ -100,7 +111,8 @@ def api(method: str, path: str, *, params=None, body=None, allow_404=False, time
         low = rem is not None and rem.isdigit() and int(rem) < 80
         if (resp.status_code == 403 and rem == "0") or low:
             reset = int(resp.headers.get("X-RateLimit-Reset", "0") or "0")
-            wait = max(10, reset - int(time.time()) + 15)
+            # core 窗口最多等 5 分钟一轮，之后自动重试；避免长时间只等一个不准的 reset
+            wait = max(60, min(reset - int(time.time()) + 15, 300))
             if RATE_GATE.is_set():
                 RATE_GATE.clear()
                 print(f"[rate-limit] 配额不足(remaining={rem})，等待重置 {wait}s", flush=True)
