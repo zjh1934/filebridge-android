@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import threading
 import hashlib
 import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -48,7 +50,7 @@ EXCLUDE_TOP = {".filebridge_sync_state.json"}     # 同步状态自身不进镜�
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 300                                       # 每批 tree 条目数
-SLEEP_PER_BLOB = 0.06                             # 轻微限速，避开 secondary rate limit
+UPLOAD_WORKERS = 8                                # 并发上传，1 GB 全量不能串行
 
 H = {
     "Accept": "application/vnd.github+json",
@@ -328,34 +330,49 @@ def main() -> int:
     for rel in drop_remote:
         entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": None})
 
-    # 上传：内容去重，相同内容只创建一次 blob
-    for i, rel in enumerate(push, 1):
+    # 并发上传：worker 内部才读文件，内存里同时最多只有 UPLOAD_WORKERS 个大文件。
+    # 内容去重靠 known + 锁；每满一批立刻提交，中途限流/断网不丢已同步的部分。
+    known_lock = threading.Lock()
+
+    def upload_one(rel: str):
         if not safe_rel(rel):
-            continue
+            return None
         data = (LOCAL / rel).read_bytes()
         sha = blob_sha(data)
-        if sha not in known:
+        with known_lock:
+            exists = sha in known
+        if not exists:
             b = api("POST", "/git/blobs",
                     body={"content": base64.b64encode(data).decode(), "encoding": "base64"},
                     timeout=240)
-            known.add(b["sha"])
+            with known_lock:
+                known.add(b["sha"])
             sha = b["sha"]
-            time.sleep(SLEEP_PER_BLOB)
-        entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": sha})
-        info[rel] = {
-            "sha": blob_sha(data),
-            "size": len(data),
-            "mtime_ns": (LOCAL / rel).stat().st_mtime_ns,
-        }
-        if i % 200 == 0:
-            print(f"[push] {i}/{len(push)}", flush=True)
+        st = (LOCAL / rel).stat()
+        return ({"path": rel, "mode": "100644", "type": "blob", "sha": sha},
+                {"sha": blob_sha(data), "size": len(data), "mtime_ns": st.st_mtime_ns})
 
-    # 分批提交，中途限流也不会丢已提交的进度
-    for i in range(0, len(entries), BATCH):
-        chunk = entries[i:i + BATCH]
-        parent, tree_sha = flush(chunk, parent, tree_sha)
-        print(f"[commit] 批次 {i // BATCH + 1}/{(len(entries) + BATCH - 1) // BATCH}"
-              f" · {len(chunk)} 条 · {parent[:8]}", flush=True)
+    with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
+        futures = [ex.submit(upload_one, rel) for rel in push]
+        for i, fut in enumerate(as_completed(futures), 1):
+            r = fut.result()
+            if r is None:
+                continue
+            entry, meta = r
+            entries.append(entry)
+            info[entry["path"]] = meta
+            if len(entries) >= BATCH:
+                parent, tree_sha = flush(entries, parent, tree_sha)
+                print(f"[commit] 已提交 {i}/{len(push)} · {parent[:8]}", flush=True)
+                entries = []
+            if i % 200 == 0:
+                print(f"[push] {i}/{len(push)}", flush=True)
+
+    # 收尾：不足一批的条目
+    if entries:
+        parent, tree_sha = flush(entries, parent, tree_sha)
+        print(f"[commit] 收尾 {len(entries)} 条 · {parent[:8]}", flush=True)
+        entries = []
 
     save_state(info)
     print(f"[done] 同步完成 · 本地 {len(info)} 文件 · "

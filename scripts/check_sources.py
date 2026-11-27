@@ -152,7 +152,7 @@ def t_persistent_sync():
     s = code_only((ROOT / "scripts/sync_persistent.py").read_text("utf-8"))
     for kw in ["def remote_snapshot(", "def local_scan(", "def decide(",
                "def blob_sha(", "def flush(", "def pull_file(", "def backup_local(",
-               "base_tree", "BATCH = 300", "SLEEP_PER_BLOB", "rate-limit",
+               "base_tree", "BATCH = 300", "UPLOAD_WORKERS", "ThreadPoolExecutor", "rate-limit",
                "GITKEEP", ".filebridge_sync_state.json", "EXCLUDE_TOP",
                "truncated", "safe_rel(", "retry"]:
         assert kw in s, f"sync_persistent.py 缺少 {kw}"
