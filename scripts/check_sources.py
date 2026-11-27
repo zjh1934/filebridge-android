@@ -152,7 +152,7 @@ def t_persistent_sync():
     s = code_only((ROOT / "scripts/sync_persistent.py").read_text("utf-8"))
     for kw in ["def remote_snapshot(", "def local_scan(", "def decide(",
                "def blob_sha(", "def flush(", "def pull_file(", "def backup_local(",
-               "base_tree", "BATCH = 300", "UPLOAD_WORKERS", "ThreadPoolExecutor", "rate-limit",
+               "base_tree", "BATCH = 60", "UPLOAD_WORKERS", "ThreadPoolExecutor", "rate-limit",
                "def group_of(", "def belongs(", "\"groups\"", "groups_done",
                "SCAN_CACHE", "confirmed", "BLOB_SPACING", "def api(",
                "GITKEEP", ".filebridge_sync_state.json", "EXCLUDE_TOP",

@@ -58,7 +58,7 @@ def skip_rel(rel: str) -> bool:
     return any(c in SKIP_COMPONENTS for c in parts) or rel in EXCLUDE_TOP
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
-BATCH = 300                                       # 每批 tree 条目数
+BATCH = 60                                        # 每批 tree 条目数：树变大后 GitHub 会拒绝大批量
 UPLOAD_WORKERS = 2                                # 写操作太猛会撞 secondary rate limit
 BLOB_SPACING = 0.35                               # 全局最小间隔（秒），温和推进
 _BLOB_LOCK = threading.Lock()
