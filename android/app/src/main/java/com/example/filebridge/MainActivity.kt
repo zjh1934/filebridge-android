@@ -76,8 +76,10 @@ class MainActivity : ComponentActivity() {
 }
 
 private const val GH_OWNER = "zjh1934"
-private const val GH_REPO = "filebridge-android"
-private const val GH_ROOT = "sandbox-files"
+// 数据仓（私有）与代码仓 filebridge-android 彻底分开：
+// 这个仓库的根目录 = /data/user_persistent_data 的根目录，全量镜像，不只是几个中转文件。
+private const val GH_REPO = "filebridge-persistent"
+private const val GH_ROOT = ""
 
 // ---------------------------------------------------------------- 小工具
 private fun queryName(ctx: Context, uri: Uri): String {
@@ -470,9 +472,9 @@ fun App() {
                 Spacer(Modifier.height(10.dp))
                 Text(
                     text = if (token.isBlank())
-                        "还没连上仓库，粘一次令牌就能看到文件。"
+                        "还没连上仓库，粘一次令牌就能看到持久区里的全部文件。"
                     else
-                        "连的是 $GH_OWNER/$GH_REPO 的 $GH_ROOT 目录，这个目录里有 ${dirs.size + files.size} 项。",
+                        "连的是私有仓库 $GH_OWNER/$GH_REPO，它是跨对话持久区的完整镜像，当前目录 ${dirs.size + files.size} 项。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -500,7 +502,7 @@ fun App() {
                             Column(Modifier.padding(18.dp)) {
                                 SectionTitle("先连上沙盒")
                                 Text(
-                                    text = "把令牌粘在下面，点一次保存。之后每次打开都能直接看文件，不用再填。",
+                                    text = "令牌能读写那个私有仓库。粘一次保存，之后打开就能看到持久区里的全部文件和目录，不用再填。",
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
                                 Spacer(Modifier.height(14.dp))

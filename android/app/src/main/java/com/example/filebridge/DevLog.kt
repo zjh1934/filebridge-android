@@ -25,6 +25,10 @@ import java.util.TimeZone
  *  - 每条 HTTP 请求单独记 HttpRec，导出时生成「网络请求明细」表，方便定位到底是接口还是界面出错。
  *  - 异常带完整 stackTraceToString，导出时单独成块，不用在聊天里贴截图。
  */
+// 数据镜像仓（私有），与 APP 代码仓分开；仅用于日志里标注连的是哪个仓库
+private const val GH_MIRROR_OWNER = "zjh1934"
+private const val GH_MIRROR_REPO = "filebridge-persistent"
+
 enum class LogLevel { D, I, W, E }
 
 data class HttpRec(
@@ -262,8 +266,7 @@ object DevLog {
             .distinctBy { "${it.ts}|${it.tag}|${it.msg}" }
             .sortedBy { it.ts }
         val s = summary()
-        val cfg = ctx.getSharedPreferences("filebridge", Context.MODE_PRIVATE)
-        val base = cfg.getString("base", "(未设置)") ?: "(未设置)"
+        val mirror = "$GH_MIRROR_OWNER/$GH_MIRROR_REPO"
         val appVersion = appVersion(ctx)
 
         val b = StringBuilder()
@@ -280,7 +283,7 @@ object DevLog {
         b.appendLine("| 会话开始 | ${fmtFull(sessionStart)} |")
         b.appendLine("| APP 版本 | ${mdEscape(appVersion)} |")
         b.appendLine("| 设备 | ${mdEscape(deviceInfo())} |")
-        b.appendLine("| 服务地址 | `${mdEscape(sanitize(base))}` |")
+        b.appendLine("| 镜像仓库 | `${mdEscape(mirror)}` (private) |")
         b.appendLine("| API Token | `[REDACTED]` |")
         b.appendLine("| 日志文件 | `filesDir/devlog/devlog.ndjson` (${s.sizeBytes} B) |")
         b.appendLine()

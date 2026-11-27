@@ -67,6 +67,13 @@ class GitHubStore(
     private fun trashRelOf(rel: String): String =
         listOf(root.trim('/'), ".trash", rel.trim('/')).filter { it.isNotEmpty() }.joinToString("/")
 
+    /** 仓库根（持久区根）时不能拼成 contents/ ，要去掉那条斜杠 */
+    private fun contentsUrl(rel: String, withRef: Boolean = true): String {
+        val p = pathOf(rel)
+        val base = if (p.isBlank()) api else "$api/$p"
+        return if (withRef) "$base?ref=$branch" else base
+    }
+
     private fun call(req: Request): JSONObject? {
         // 防御：主线程直接发同步请求会抛 NetworkOnMainThreadException（message 为 null，很难查）
         if (Looper.getMainLooper()?.thread == Thread.currentThread()) {
@@ -136,7 +143,7 @@ class GitHubStore(
     suspend fun list(parent: String): ListResp = io {
         if (token.isBlank()) error("还没粘贴令牌：请先连上沙盒")
         val rel = parent.trim('/')
-        val req = headers().url("$api/${pathOf(rel)}?ref=$branch").get().build()
+        val req = headers().url(contentsUrl(rel)).get().build()
         val j = call(req) ?: return@io ListResp(parent = rel)
         val arr = j.optJSONArray("__array") ?: return@io ListResp(parent = rel)
         val dirs = mutableListOf<FileItem>()
@@ -153,7 +160,7 @@ class GitHubStore(
     }
 
     private fun getRaw(rel: String): JSONObject? {
-        val req = headers().url("$api/${pathOf(rel)}?ref=$branch").get().build()
+        val req = headers().url(contentsUrl(rel)).get().build()
         return call(req)
     }
 
@@ -182,7 +189,7 @@ class GitHubStore(
         o.put("content", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
         o.put("branch", branch)
         if (!oldSha.isNullOrBlank()) o.put("sha", oldSha)
-        val req = headers().url("$api/${pathOf(rel)}")
+        val req = headers().url(contentsUrl(rel, withRef = false))
             .put(o.toString().toRequestBody(jsonMedia)).build()
         val j = call(req) ?: error("写入失败")
         val content = j.optJSONObject("content") ?: JSONObject()
@@ -238,7 +245,7 @@ class GitHubStore(
     private fun deleteRaw(rel: String, message: String) {
         val sha = currentSha(rel) ?: return
         val o = JSONObject().put("message", message).put("sha", sha).put("branch", branch)
-        val req = headers().url("$api/${pathOf(rel)}")
+        val req = headers().url(contentsUrl(rel, withRef = false))
             .delete(o.toString().toRequestBody(jsonMedia)).build()
         call(req)
     }
@@ -259,7 +266,7 @@ class GitHubStore(
 
     suspend fun trash(): List<TrashItem> = io {
         if (token.isBlank()) return@io emptyList()
-        val req = headers().url("$api/${trashRelOf("")}?ref=$branch").get().build()
+        val req = headers().url(contentsUrl(joinRel(".trash", ""))).get().build()
         val j = call(req) ?: return@io emptyList()
         val arr = j.optJSONArray("__array") ?: return@io emptyList()
         val out = mutableListOf<TrashItem>()

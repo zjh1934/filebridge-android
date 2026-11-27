@@ -1,176 +1,168 @@
-# FileBridge · 在手机上查看和编辑沙盒里的文件
+# FileBridge · 在手机上查看和编辑跨对话持久区
 
-> **不是手机本地文件管理器。** 系统自带的比手搓的强 100 倍。
-> 它只做一件事：让你在手机上**看到沙盒里的文件、打开、编辑、保存、删除**，改完还能回到沙盒。
+> 这个 APP 唯一的目标：把 `/data/user_persistent_data`（**真正跨对话保留的目录**，不是 `/data/workspace` 工作区）完整映射到手机，能浏览目录结构、打开、编辑、保存、删除；改动还能同步回沙盒。
 
-- **源码仓库**：https://github.com/zjh1934/filebridge-android
-- **最新安装包**：https://github.com/zjh1934/filebridge-android/releases/tag/v1.4
-- **签名**：v1.1 起固定同一张证书，后续版本直接覆盖安装
-- **版本规则**：`FileBridge-v1.4.apk` → v1.5 → v1.6 …，每出一次包 +0.1
-- APP 内置**一键导出 Markdown 开发者日志**
+## 两个仓库，彻底分开
+
+| 仓库 | 用途 | 可见性 |
+| --- | --- | --- |
+| **zjh1934/filebridge-android** | APP 源码、CI、打包、Release | 公开 |
+| **zjh1934/filebridge-persistent** | **持久区完整镜像**，APP 读写的对象 | **私有** |
+
+- 最新安装包：https://github.com/zjh1934/filebridge-android/releases/tag/v1.5
+- 签名固定：v1.1 起同一张证书，后续版本直接覆盖安装
+- 版本规则：`FileBridge-v1.5.apk` → v1.6 → v1.7 …
+- APP 内置一键导出 Markdown 开发者日志
+
+镜像仓的**仓库根目录 = `/data/user_persistent_data` 根目录**。实测规模：
+
+```
+5670 文件 · 690 目录（40 个空目录）· 约 1 GB
+_r198_patch.py / filebridge / lovers(793 文件 867.6 MB) / 听本(4614 文件 61.8 MB) / 林晚(255 文件 86.4 MB)
+```
+
+空目录在 Git 里存不住，用 `.gitkeep` 占位保留结构，APP 自动隐藏该占位文件。
 
 ---
 
-## 1. 为什么手机不能直接连沙盒
+## 1. 为什么这样做
 
-沙盒是云端隔离环境：`/data/workspace`、`/data/user_persistent_data` 都在容器里，手机拿不到路径，平台也没有对外暴露文件服务或入站端口。所以「填个 IP 连过去」走不通 —— `10.0.2.2:8765` 那次超时就是这个原因（那还是模拟器专用地址）。
+沙盒持久区在云端隔离容器里，手机拿不到路径，平台也没有对外文件服务或入站端口，所以「填 IP 连过去」走不通。
 
-GitHub **不能**当常驻网关（Pages 只发静态页，Actions 跑完就销毁，不能监听端口），但它的 **Contents API 本身就是 7×24 在线的文件读写接口**，拿来当**摆渡中转站**刚刚好。不需要电脑、路由器、光猫 IP、公网入口或常驻服务器。
+GitHub **不能**当常驻网关（Pages 只发静态页，Actions 跑完就销毁），但它的 **Contents API / Git Data API 是 7×24 在线的文件读写接口**，适合当摆渡镜像。不需要电脑、路由器、光猫 IP、公网服务器。
+
+之前 v1.2～v1.4 只在代码仓里开了个 `sandbox-files/` 小目录塞 5 个文档，方向错了。**v1.5 改成整个持久区全量镜像，并把数据仓独立出来。**
 
 ---
 
 ## 2. 数据怎么走
 
 ```
-沙盒持久区  /data/user_persistent_data/filebridge/sandbox-files/
-     │  scripts/sync_to_github.py   （我在对话里执行）
+沙盒持久区 /data/user_persistent_data/
+     │  scripts/sync_persistent.py  sync   （我在对话里跑）
      ▼
-GitHub 仓库 zjh1934/filebridge-android 的 sandbox-files/ 目录
-     │  手机 APP 通过 Contents API 直接列目录 / 读 / 写 / 删
+私有镜像仓 zjh1934/filebridge-persistent  （根目录一一对应）
+     │  手机 APP 通过 Contents API 列目录 / 读 / 写 / 删
      ▼
-安卓 APP（只有「沙盒文件」这一件事）
-     │  编辑保存 = PUT 回仓库
+安卓 APP：浏览全部目录、查看、编辑并保存、删除、新建、导入
+     │  编辑保存 = PUT 回镜像仓
      ▼
-下次开对话说「同步沙盒文件」→ scripts/pull_from_github.py 回灌持久区
+下次说「同步持久区」→ sync_persistent.py 三向比较 → 回灌持久区
 ```
 
-查看和编辑是即时的；**回到沙盒**要等下次对话跑一次回灌脚本。不是实时双向同步，这点如实说明。
+**不是实时的**：手机改完仓库即时生效，回到持久区要跑一次同步；沙盒里改了也要跑一次才推上去。
 
 ---
 
-## 3. 用户怎么用（就一步）
+## 3. 用户怎么用
 
-1. 到 Release 页下载 `FileBridge-v1.4.apk`，安装
-2. 打开 → 首页「**先连上沙盒**」→ 把令牌**粘一次** → 点「保存并查看文件」
-3. 之后打开直接看到文件列表，点文件 → 「编辑并保存」→「保存到沙盒」
+1. 下载 `FileBridge-v1.5.apk`，安装（v1.1～v1.4 直接覆盖）
+2. 打开 → 首页「先连上沙盒」→ 把令牌**粘一次** → 点「保存并查看文件」
+3. 之后打开就能看到 `lovers / 听本 / 林晚 / filebridge` 等全部顶层目录，点进去、点「编辑并保存」即可
 
-仓库地址、`sandbox-files` 目录、分支全部预置在包里，**不用填 IP、不用配路由器、不用懂网络**。顶部「已连接」小圆点可以点开改令牌。
+仓库地址、分支全部预置，**不用填 IP、不用配路由器、不用懂网络**。同一个 PAT 既能读私有仓也能写代码仓，不用第二个令牌。
 
-> 改完想让内容回到沙盒持久区，跟我说一句「同步沙盒文件」。
-
----
-
-## 4. 隐私边界（重要）
-
-`filebridge-android` 是**公开仓库**，`sandbox-files/` 里的内容别人也能看到。
-
-- 只同步专门的 `sandbox-files/` 目录
-- **不碰** `/data/user_persistent_data` 下其它私人资料（如 `lovers`、`听本`、`林晚`）
-- 想编辑沙盒里别的文件，说一句「把 XXX 放进沙盒文件」，我同步过去
-- 别往这个目录放敏感内容
-
-令牌只存在 APP 私有 `SharedPreferences`，不写进 APK、不进仓库、导出日志时自动打码。那个 PAT 权限范围很大又在聊天里明文出现过，建议抽空换成**只授权这一个仓库 Contents 读写**的细粒度令牌，重新粘一次即可。
+> 改完想让内容回到持久区，跟我说一句「**同步持久区**」。我改完持久区里的文件也会主动同步一次。
 
 ---
 
-## 5. v1.4 修了什么（真机日志定位）
+## 4. 同步脚本（放两份，跨对话不会丢）
 
-用户导出的开发者日志显示：15 条网络请求全部 `→ -1 (1ms)`，异常是 **`android.os.NetworkOnMainThreadException`**，堆栈落在 `GitHubStore.call()` → `OkHttp execute()` → `AndroidUiDispatcher`（主线程）。
-
-根因：`GitHubStore` 用 OkHttp **同步** `execute()`，方法虽写成 `suspend`，但没切 `Dispatchers.IO`；`rememberCoroutineScope()` 绑主线程，StrictMode 直接拦截。**suspend 只是标记，不会自动换线程**。所以从 v1.2 起，APP 里所有联网操作一次都没成功过 —— 之前声称的"闭环实测"是 Python 脚本模拟的，CI 编译和 19/19 服务端验证都碰不到这条链路。
-
-修复：
-
-| 改动 | 说明 |
+| 位置 | 作用 |
 | --- | --- |
-| 所有对外方法 `suspend` + `io{}` | `withContext(Dispatchers.IO)` 统一切线程 |
-| `call()` 加主线程断言 | 漏切时报明确文案，不再是 `null` |
-| 嵌套调用收进 IO 块 | `saveText` → `currentSha` → `put` 全程不回主线程 |
-| CI 新增 `Source self-check` | 每次打包前跑线程安全静态断言，防回归 |
+| `scripts/sync_persistent.py`（代码仓） | 随源码版本管理 |
+| `/data/user_persistent_data/filebridge/sync_persistent.py`（持久区） | **下次开新对话仍在**，且会被同步进镜像仓，APP 里也能看到 |
 
-顺带修了两个小毛病：日志里 `APP 版本 | 0.1 (versionCode 1)` 是**硬编码**，改成从 `PackageInfo` 动态读取；异常 message 为 null 时「没能读到沙盒文件：」后面一片空白，现在有兜底文案。
+```bash
+export FILEBRIDGE_GH_TOKEN='你的令牌'
 
-≥ 验证边界：沙盒无安卓真机，依据是**日志堆栈 + Kotlin 编译 + 14 项静态自检（含线程安全）+ 带令牌的 Contents API 实读**。真机效果需装包点一下刷新确认。
+python3 scripts/sync_persistent.py status   # 只比较，不改动
+python3 scripts/sync_persistent.py sync     # 双向增量同步
+```
+
+设计要点：
+
+- **三向比较**：`base`（上次同步状态）/ `local`（持久区）/ `remote`（镜像仓），用 **git blob sha1** 当内容指纹，不下载远端内容就能判断谁改了
+- 仅本地变 → 上传；仅远端变 → 回灌持久区；两边都变 → **以手机编辑为准**，本地版本备份到 `/data/workspace/conflicts/`
+- **断点续传**：分批提交（每批 300 条 tree 条目），中途限流或断网不丢进度，下次接着跑
+- 内容去重（相同内容只建一次 blob）、轻微限速、403/429 自动退避
+- 空目录用 `.gitkeep` 占位；同步状态存 `.filebridge_sync_state.json`，不进镜像、APP 里隐藏
+
+为什么不用 `git push`：沙盒可用磁盘只剩约 0.4 GB，而持久区约 1 GB，`git clone` + 对象库放不下。脚本全程流式，一次只在内存里拿一个文件，不需要额外磁盘。
 
 ---
 
-## 6. v1.3 做过的事（保留）
+## 5. 隐私边界（重要）
 
-**瘦身**：清掉 1.1 残留的 `LocalStore.kt` 本机管理器、云网关客户端和 Retrofit/Gson 依赖；启用 **Android 官方 R8 代码压缩 + 资源收缩**（`proguard-rules.pro` 保留自己的代码、数据模型和 `FileProvider`）。实测 **v1.2 6,503,992 B → v1.3 1,581,843 B，小了 75.7%**。
+镜像仓是**私有**的，因为全量映射包含 `lovers`、`听本`、`林晚` 等私人资料。之前公开代码仓里的 `sandbox-files/` 只有 5 个文档，不涉及这些资料。
 
-**UI 重设计**：依据 GitHub 上 `anthropics/skills` 的 **frontend-design** 规约（先定 token 再画界面、避开 AI 默认审美、单点 bold 其余克制、文案用用户语言、错误/空态给下一步），加 Material 3 形状/字阶刻度和 Now in Android `:core:designsystem` 做法。颜色/字阶/圆角集中在 `Theme.kt`；顶部路径面包屑当主视觉、文件卡带类型徽章、操作收进底部动作面板。
+- 令牌只存在 APP 私有 `SharedPreferences`，不写进 APK、不进任何仓库、导出日志时自动打码
+- 同步脚本从环境变量读令牌，**脚本本身不含令牌**
+- 那串 PAT 权限很大（`repo`、`workflow`、`delete_repo` 等）又在聊天里明文出现过 → **建议换成只授权这两个仓库的细粒度令牌**，换完重新粘一次即可
+- 别把镜像仓改成公开
+
+---
+
+## 6. 版本历史要点
+
+| 版本 | 做了什么 |
+| --- | --- |
+| v1.1 | 固定签名、版本命名规则（方向曾误做成本机文件管理器） |
+| v1.2 | 改回沙盒文件，用代码仓 `sandbox-files/` 做中转 |
+| v1.3 | 清残留 + R8 压缩（6.50 MB → 1.58 MB）、按 GitHub `frontend-design` 与 Material 3 重做 UI |
+| v1.4 | 真机日志定位并修复 `NetworkOnMainThreadException`，全部网络切 `Dispatchers.IO` |
+| **v1.5** | **两仓分离、私有镜像仓全量映射整个持久区、双向增量同步脚本** |
 
 ---
 
 ## 7. 目录结构
 
 ```
-filebridge/
-├── .github/
-│   ├── workflows/build-apk.yml    # CI：自检 → 固定签名 → 打包 → 发 Release
-│   └── RELEASE_BODY.md            # Release 页面正文
+filebridge/                          ← 代码仓（公开）
+├── .github/workflows/build-apk.yml  # 自检 → 固定签名 → 打包 → Release
+├── .github/RELEASE_BODY.md
 ├── scripts/
-│   ├── sync_to_github.py          # ★ 沙盒 → 仓库
-│   ├── pull_from_github.py        # ★ 仓库 → 沙盒
-│   ├── verify.py                  # 服务端 19 项端到端验证
-│   ├── check_sources.py           # 源码静态自检（含线程安全断言）
-│   ├── start_server.sh            # （可选）云网关
-│   └── sync_workspace.py          # （可选）工作区 → 持久区
-├── server/app.py                  # （可选）文件网关服务
-├── web/index.html                 # （可选）Web 控制台
-├── sandbox-files/                 # ★ 中转目录（推到仓库同名目录）
+│   ├── sync_persistent.py           # ★ 持久区 ↔ 私有镜像仓 双向同步
+│   ├── check_sources.py             # 静态自检（含两仓分离、线程安全）
+│   ├── verify.py                    # 服务端 19 项端到端验证
+│   ├── start_server.sh / sync_workspace.py   # （可选）旧网关/工作区工具
+├── server/ · web/                   # （可选）网关服务与 Web 控制台
 ├── android/app/src/main/java/com/example/filebridge/
-│   ├── GitHubStore.kt             # ★ Contents API 后端（v1.4 全量切 Dispatchers.IO）
-│   ├── Models.kt                  # 共用的纯 Kotlin 数据模型
-│   ├── Theme.kt                   # ★ 设计系统：颜色 / 字阶 / 形状 token
-│   ├── DevLog.kt                  # 日志采集 / 脱敏 / MD 导出 / 动态版本号
-│   └── MainActivity.kt            # 单模式界面
+│   ├── GitHubStore.kt               # ★ Contents API 后端（根路径、Dispatchers.IO）
+│   ├── Models.kt / Theme.kt / DevLog.kt / MainActivity.kt
 ├── VERIFY.md / VERIFY_STATIC.md
 └── README.md
+
+filebridge-persistent/               ← 数据仓（私有），根目录 = /data/user_persistent_data
+└── lovers/ 听本/ 林晚/ filebridge/ _r198_patch.py ...
 ```
 
 ---
 
-## 8. 沙盒侧同步命令
+## 8. 固定签名与版本规矩
 
-```bash
-export FILEBRIDGE_GH_TOKEN='你的令牌'
-
-python3 scripts/sync_to_github.py      # 沙盒文件推到仓库，手机就能看到
-python3 scripts/pull_from_github.py    # 手机改动回灌进沙盒持久区
-```
-
-两个脚本都带 `[skip ci]`，CI 也配了 `paths-ignore: sandbox-files/**`，同步文件不会触发重新打包。
+- 自签名证书加密存在 Actions Secret `FILEBRIDGE_KEYSTORE_B64`，不进公开仓库；`apksigner verify --print-certs` 每轮校验
+- applicationId 固定 `com.example.filebridge`，versionCode 递增 → **v1.5 直接覆盖 v1.1～v1.4**
+- CI 顶部三行控制一切：`APP_VERSION` / `APK_NAME` / `RELEASE_TAG`，每版 +0.1，`build.gradle.kts` 同步
 
 ---
 
-## 9. 固定签名与版本规矩
+## 9. 开发者日志
 
-- 自签名证书（RSA 2048，30 年）本体**不进公开仓库**，加密存在 Actions Secret `FILEBRIDGE_KEYSTORE_B64`，CI 构建时解码使用；`apksigner verify --print-certs` 每轮校验。
-- applicationId 固定 `com.example.filebridge`，versionCode 递增 → **v1.4 直接覆盖 v1.1/v1.2/v1.3**，不卸载、不丢数据。
-- CI 顶部三行控制一切：
-
-```yaml
-APP_VERSION: "1.4"
-APK_NAME: "FileBridge-v1.4.apk"
-RELEASE_TAG: "v1.4"
-```
-
-每出一个版本三行一起 +0.1，`build.gradle.kts` 的 `versionName` 同步、`versionCode` +1。
+「运行日志」chip →「导出 Markdown」/「另存为…」。记录生命周期、目录导航、每次 GitHub 请求的状态码与耗时、异常完整堆栈、设备信息、真实 APP 版本、镜像仓地址。令牌与签名参数一律打码。
 
 ---
 
-## 10. 一键导出 Markdown 开发者日志
+## 10. 已知限制
 
-「运行日志」chip →「导出 Markdown」/「另存为…」。
-
-记录：生命周期、目录导航、**每次 GitHub 请求的路径/状态码/耗时**、文件读写字节数、异常完整堆栈、设备与系统信息、真实 APP 版本。导出 MD 含导出信息 / 运行摘要 / 最近状态 / 完整时间线 / 网络请求明细 / 异常堆栈。
-
-`sanitize()` 把 `sig=`、`token=`、`x-api-key`、`Bearer`、`ghp_/github_pat_` 一律打码，Token 固定写 `[REDACTED]`。
-
----
-
-## 11. 已知限制
-
-- **不是实时双向**：手机改完仓库即时生效，回灌沙盒要下次对话跑脚本。
-- Contents API 单文件上限 100 MB，建议放文本 / 文档 / 代码类。
-- 公开仓库 = 中转内容公开，见第 4 节。
-- 沙盒无安卓真机，UI 与网络行为以真机为准；出问题导日志即可定位。
-- 开发者日志只存本地，不自动上传。
+- 首次全量约 1 GB / 5670 文件，通过 Git Data API 分批提交，耗时长；GitHub 会提示「仓库建议保持 1 GB 以下」，不影响读写
+- 不是实时双向同步，需跑一次 `sync`
+- APP 打开大图会先下载到本机；单文件超 100 MB 走不了 Contents API
+- 沙盒无安卓真机，UI 与网络行为以真机为准；出问题导日志定位
+- 开发者日志只存本地，不自动上传
 
 ---
 
-## 12. 跨对话持久性验证
+## 11. 跨对话持久性验证
 
-`scripts/sync_workspace.py --init` 会写 `/data/user_persistent_data/filebridge/CROSS_SESSION_MARKER.txt`。
-下次新开对话让我读这个路径，文件还在、创建时间不变，就说明持久区确实跨对话保留。
+`/data/user_persistent_data/filebridge/CROSS_SESSION_MARKER.txt` 是跨对话标记。下次新开对话让我读它，文件还在、创建时间不变，就说明持久区确实跨对话保留。同步脚本也在持久区里，下次可以直接跑。

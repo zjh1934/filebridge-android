@@ -5,7 +5,6 @@ on:
     branches: [main]
     # 沙盒文件中转目录的 commit 不触发重新打包（同步脚本也带 [skip ci]）
     paths-ignore:
-      - 'sandbox-files/**'
   workflow_dispatch:
 
 permissions:
@@ -18,9 +17,9 @@ concurrency:
 
 env:
   # ---- 版本规则：每出一个包只改这里，APK 名 / tag / 标题全部跟着走 ----
-  APP_VERSION: "1.4"
-  APK_NAME: "FileBridge-v1.4.apk"
-  RELEASE_TAG: "v1.4"
+  APP_VERSION: "1.5"
+  APK_NAME: "FileBridge-v1.5.apk"
+  RELEASE_TAG: "v1.5"
 
 jobs:
   build:
@@ -131,7 +130,7 @@ jobs:
           ls -lh app/build/outputs/apk/release/
           cp app/build/outputs/apk/release/app-release.apk "${APK_NAME}"
           echo "APK=${APK_NAME}"
-          echo "v1.3 size: $(stat -c%s "${APK_NAME}") bytes (v1.2 was 6503992)"
+          echo "v1.5 size: $(stat -c%s "${APK_NAME}") bytes"
           sha256sum "${APK_NAME}"
 
       - name: Upload build artifact
