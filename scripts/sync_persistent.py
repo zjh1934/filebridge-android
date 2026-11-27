@@ -50,7 +50,18 @@ EXCLUDE_TOP = {".filebridge_sync_state.json"}     # 同步状态自身不进镜�
 GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 300                                       # 每批 tree 条目数
-UPLOAD_WORKERS = 8                                # 并发上传，1 GB 全量不能串行
+UPLOAD_WORKERS = 16                               # 并发上传，1 GB 全量不能串行
+BLOB_CACHE = Path(os.getenv("FB_BLOB_CACHE", "/data/workspace/.persistent_blob_cache.json"))
+
+# 每线程一个长连接 Session：避免每个 blob 都重新 TLS 握手（之前慢的主因之一）
+_TLS = threading.local()
+
+def http_session() -> requests.Session:
+    s = getattr(_TLS, "s", None)
+    if s is None:
+        s = requests.Session()
+        _TLS.s = s
+    return s
 
 H = {
     "Accept": "application/vnd.github+json",
@@ -67,8 +78,8 @@ def api(method: str, path: str, *, params=None, body=None, allow_404=False, time
         hdr["Authorization"] = f"Bearer {TOKEN}"
     for attempt in range(6):
         try:
-            resp = requests.request(method, url, headers=hdr, params=params,
-                                    json=body, timeout=timeout)
+            resp = http_session().request(method, url, headers=hdr, params=params,
+                                          json=body, timeout=timeout)
         except Exception as e:
             if attempt == 5:
                 raise
@@ -310,7 +321,13 @@ def main() -> int:
             (LOCAL / d).mkdir(parents=True, exist_ok=True)
 
     # 构造 tree 条目
+    # 已创建的 blob 缓存：中途重启也不重复上传相同内容
     known = set(remote.values())
+    try:
+        known |= set(json.loads(BLOB_CACHE.read_text("utf-8")))
+        print(f"[cache] 复用 {len(known)} 个已创建 blob", flush=True)
+    except Exception:
+        pass
     entries = []
 
     # 空目录占位：本地空目录 → 远端补 .gitkeep；本地不再空 → 删掉多余 .gitkeep
@@ -333,6 +350,7 @@ def main() -> int:
     # 并发上传：worker 内部才读文件，内存里同时最多只有 UPLOAD_WORKERS 个大文件。
     # 内容去重靠 known + 锁；每满一批立刻提交，中途限流/断网不丢已同步的部分。
     known_lock = threading.Lock()
+    new_blobs = 0
 
     def upload_one(rel: str):
         if not safe_rel(rel):
@@ -348,10 +366,12 @@ def main() -> int:
             with known_lock:
                 known.add(b["sha"])
             sha = b["sha"]
+            global_new.append(sha)
         st = (LOCAL / rel).stat()
         return ({"path": rel, "mode": "100644", "type": "blob", "sha": sha},
                 {"sha": blob_sha(data), "size": len(data), "mtime_ns": st.st_mtime_ns})
 
+    global_new = []
     with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
         futures = [ex.submit(upload_one, rel) for rel in push]
         for i, fut in enumerate(as_completed(futures), 1):
@@ -366,7 +386,21 @@ def main() -> int:
                 print(f"[commit] 已提交 {i}/{len(push)} · {parent[:8]}", flush=True)
                 entries = []
             if i % 200 == 0:
+                if global_new:
+                    try:
+                        old = set(json.loads(BLOB_CACHE.read_text("utf-8"))) if BLOB_CACHE.exists() else set()
+                        BLOB_CACHE.write_text(json.dumps(sorted(old | set(global_new))), "utf-8")
+                    except Exception:
+                        pass
+                    global_new = []
                 print(f"[push] {i}/{len(push)}", flush=True)
+
+    if global_new:
+        try:
+            old = set(json.loads(BLOB_CACHE.read_text("utf-8"))) if BLOB_CACHE.exists() else set()
+            BLOB_CACHE.write_text(json.dumps(sorted(old | set(global_new))), "utf-8")
+        except Exception:
+            pass
 
     # 收尾：不足一批的条目
     if entries:
