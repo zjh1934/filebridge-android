@@ -152,6 +152,7 @@ Davio / Material Files / Voyager 的文件管理交互，以及 Material 3 关�
 | 逐项目分批 + 每批 60 条独立 commit | 1 GB 全量不会一次压垮 GitHub；每批落盘，中断可续 |
 | `.git` 内部目录跳过 | `听本/tingben/.git` 是另一个 Git 仓库的元数据，GitHub 不接受该路径组件 |
 | 空目录 `.gitkeep` 占位 | 42 个空目录的结构照样保留，APP 自动隐藏占位文件 |
+| 删除后清理空壳目录 | 手机端重命名/删除整个目录后，`drop_local` 会向上清掉变空的父目录，不留空壳；有 `.gitkeep` 的合法空目录不动 |
 | 内容去重 + blob 缓存 + 限速退避 | 避开 GitHub 5000 次/小时的 core 配额与写限流 |
 
 ### 命令

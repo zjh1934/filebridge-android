@@ -150,6 +150,7 @@ def t_two_repos():
     assert "suspend fun renameFolder(" in g, "缺少文件夹重命名"
     assert "suspend fun renameAny(" in g, "缺少统一重命名入口"
     assert "/git/trees" in g and "JSONObject.NULL" in g, "目录重命名未走 Git Tree API"
+    assert "/git/refs/heads/$branch" in g, "更新 ref 必须用复数 /git/refs/heads/"
     assert '"isDir", true' in g, "目录删除未打包成一条回收站记录"
     d = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
     assert 'GH_MIRROR_REPO = "filebridge-persistent"' in d, "日志未标注镜像仓"
@@ -170,7 +171,8 @@ def t_persistent_sync():
                "SKIP_COMPONENTS", "def skip_rel(", "REPORT_NAMES",
                'choices=["sync", "status", "groups", "verify"]',
                "FB_FORCE_RESCAN", "SYNC_VERIFY.md", "SYNC_CONFLICTS.md",
-               "文件正在被写入", "truncated", "safe_rel(", "retry"]:
+               "文件正在被写入", "truncated", "safe_rel(", "retry",
+               "d.rmdir()", "因此变空的父目录"]:
         assert kw in s, f"sync_persistent.py 缺少 {kw}"
     assert "ghp_" not in s and "FILEBRIDGE_GH_TOKEN" in s, "令牌不应硬编码"
     assert "git/trees" in s and "/git/blobs" in s, "未走 Git Data API 流式同步"

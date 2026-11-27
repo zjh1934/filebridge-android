@@ -351,7 +351,9 @@ class GitHubStore(
                 .put("parents", org.json.JSONArray().put(head))
                 .toString().toRequestBody(jsonMedia)).build())
             ?.optString("sha") ?: error("创建 commit 失败")
-        call(headers().url(refUrl).patch(
+        // GitHub 的 GET 用单数 /git/ref/{ref}，PATCH 必须用复数 /git/refs/{ref}（不对称）
+        val updateRefUrl = "https://api.github.com/repos/$owner/$repo/git/refs/heads/$branch"
+        call(headers().url(updateRefUrl).patch(
             org.json.JSONObject().put("sha", newCommit).put("force", false)
                 .toString().toRequestBody(jsonMedia)).build())
         DevLog.i("GH", "目录改名 /$rel → /$newPrefix · $moved 文件 · 单次 commit")

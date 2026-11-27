@@ -467,12 +467,26 @@ def main() -> int:
         if i % 100 == 0:
             print(f"[pull] {i}/{len(pull)}", flush=True)
 
-    # 远端删除 → 本地删除
+    # 远端删除 → 本地删除；顺带清掉因此变空的父目录，
+    # 否则「手机上重命名/删除整个目录」会在沙盒里留下一串空壳文件夹。
+    # 有 .gitkeep 占位的合法空目录不动（那是用户特意建的空目录）。
     for rel in drop_local:
         fg = LOCAL / rel
         if safe_rel(rel) and fg.is_file():
             fg.unlink()
         info.pop(rel, None)
+        d = fg.parent
+        while d != LOCAL and d.is_dir():
+            try:
+                if any(d.iterdir()):
+                    break
+                drel = d.relative_to(LOCAL).as_posix()
+                if f"{drel}/{GITKEEP}" in keeps:
+                    break
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
 
     # 远端 .gitkeep 对应的空目录，本地也建出来（不落地 .gitkeep 文件）
     for k in keeps:
