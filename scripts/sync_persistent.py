@@ -52,8 +52,6 @@ GITKEEP = ".gitkeep"
 REMOTE_META = ".filebridge-mirror-info.md"        # 镜像仓元数据，不回灌本地
 BATCH = 300                                       # 每批 tree 条目数
 UPLOAD_WORKERS = 2                                # 写操作太猛会撞 secondary rate limit
-RATE_GATE = threading.Event()                     # 限额时只让一个线程等待
-RATE_GATE.set()
 BLOB_SPACING = 0.35                               # 全局最小间隔（秒），温和推进
 _BLOB_LOCK = threading.Lock()
 _last_blob = [0.0]
@@ -111,15 +109,10 @@ def api(method: str, path: str, *, params=None, body=None, allow_404=False, time
         low = rem is not None and rem.isdigit() and int(rem) < 80
         if (resp.status_code == 403 and rem == "0") or low:
             reset = int(resp.headers.get("X-RateLimit-Reset", "0") or "0")
-            # core 窗口最多等 5 分钟一轮，之后自动重试；避免长时间只等一个不准的 reset
-            wait = max(60, min(reset - int(time.time()) + 15, 300))
-            if RATE_GATE.is_set():
-                RATE_GATE.clear()
-                print(f"[rate-limit] 配额不足(remaining={rem})，等待重置 {wait}s", flush=True)
-                time.sleep(min(wait, 3600))
-                RATE_GATE.set()
-            else:
-                RATE_GATE.wait(timeout=min(wait + 30, 3660))
+            # 简单退避：各线程各自等一轮（不用广播锁，避免互相等待卡死）
+            wait = max(30, min(reset - int(time.time()) + 15, 180))
+            print(f"[rate-limit] 配额不足(remaining={rem})，等待 {wait}s", flush=True)
+            time.sleep(wait)
             continue
         low = resp.text.lower()
         if resp.status_code in (403, 429) and (
