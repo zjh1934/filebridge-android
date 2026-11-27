@@ -18,9 +18,9 @@ concurrency:
 
 env:
   # ---- 版本规则：每出一个包只改这里，APK 名 / tag / 标题全部跟着走 ----
-  APP_VERSION: "1.2"
-  APK_NAME: "FileBridge-v1.2.apk"
-  RELEASE_TAG: "v1.2"
+  APP_VERSION: "1.3"
+  APK_NAME: "FileBridge-v1.3.apk"
+  RELEASE_TAG: "v1.3"
 
 jobs:
   build:
@@ -126,6 +126,7 @@ jobs:
           ls -lh app/build/outputs/apk/release/
           cp app/build/outputs/apk/release/app-release.apk "${APK_NAME}"
           echo "APK=${APK_NAME}"
+          echo "v1.3 size: $(stat -c%s "${APK_NAME}") bytes (v1.2 was 6503992)"
           sha256sum "${APK_NAME}"
 
       - name: Upload build artifact
