@@ -177,7 +177,8 @@ def t_persistent_sync():
                'choices=["sync", "status", "groups", "verify"]',
                "FB_FORCE_RESCAN", "SYNC_VERIFY.md", "SYNC_CONFLICTS.md",
                "文件正在被写入", "truncated", "safe_rel(", "retry",
-               "d.rmdir()", "因此变空的父目录"]:
+               "d.rmdir()", "因此变空的父目录",
+               "暂时读不到", "扫描期间文件在变", "info[rel] = prev"]:
         assert kw in s, f"sync_persistent.py 缺少 {kw}"
     assert "ghp_" not in s and "FILEBRIDGE_GH_TOKEN" in s, "令牌不应硬编码"
     assert "git/trees" in s and "/git/blobs" in s, "未走 Git Data API 流式同步"

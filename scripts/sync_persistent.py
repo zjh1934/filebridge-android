@@ -244,18 +244,45 @@ def local_scan(state: dict, force: bool = False):
     for p in LOCAL.rglob("*"):
         rel = p.relative_to(LOCAL).as_posix()
         if p.is_dir():
-            if not any(p.iterdir()) and not skip_rel(rel):
-                empties.append(rel)
+            try:
+                if not any(p.iterdir()) and not skip_rel(rel):
+                    empties.append(rel)
+            except OSError:
+                pass  # 目录正被写入/替换，本轮不当成空目录
             continue
         if skip_rel(rel) or p.name == GITKEEP:
             continue
-        st = p.stat()
         prev = state.get(rel)
+        try:
+            st = p.stat()
+        except OSError:
+            # 关键：AI 正在原子替换文件时 stat/read 会偶发 Errno 5。
+            # 已同步过的文件必须沿用上一轮 sha —— 否则 decide() 会误判成「本地删了」，
+            # 把远端文件也删掉。新文件则本轮跳过，下一轮自动捡起。
+            if prev:
+                info[rel] = prev
+            else:
+                print(f"[skip] 暂时读不到（可能正在被写入）: {rel}", flush=True)
+            continue
         if not force and prev and prev.get("size") == st.st_size and prev.get("mtime_ns") == st.st_mtime_ns:
             info[rel] = {"sha": prev["sha"], "size": st.st_size, "mtime_ns": st.st_mtime_ns}
         else:
+            try:
+                data = p.read_bytes()
+                after = p.stat()
+                if after.st_mtime_ns != st.st_mtime_ns or after.st_size != len(data):
+                    if prev:
+                        info[rel] = prev
+                    print(f"[skip] 扫描期间文件在变，留到下一轮: {rel}", flush=True)
+                    continue
+            except OSError:
+                if prev:
+                    info[rel] = prev
+                else:
+                    print(f"[skip] 暂时读不到（可能正在被写入）: {rel}", flush=True)
+                continue
             info[rel] = {
-                "sha": blob_sha(p.read_bytes()),
+                "sha": blob_sha(data),
                 "size": st.st_size,
                 "mtime_ns": st.st_mtime_ns,
             }
