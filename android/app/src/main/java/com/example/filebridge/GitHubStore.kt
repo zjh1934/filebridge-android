@@ -3,6 +3,7 @@ package com.example.filebridge
 import android.content.Context
 import android.net.Uri
 import android.os.Looper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,6 +14,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -44,7 +46,7 @@ class GitHubStore(
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(45, TimeUnit.SECONDS)
         .build()
 
@@ -190,6 +192,57 @@ class GitHubStore(
         }
         DevLog.i("GH", "全仓索引 · ${out.size} 个文件")
         out.sorted()
+    }
+
+    /**
+     * 流式下载：用 `Accept: application/vnd.github.raw` 让 Contents API 直接返回原始字节，
+     * 边读边写进调用方给的 OutputStream，不把整个文件读进内存（20 MB 图片也安全）。
+     *
+     * 不走 call() 的原因：call() 会把 body 读成 String，二进制会被破坏。
+     * 仍然保留 call() 那道主线程断言的等价检查。
+     */
+    suspend fun downloadToSink(
+        rel: String,
+        totalHint: Long,
+        isCancelled: () -> Boolean,
+        sink: OutputStream,
+        onProgress: (done: Long, total: Long) -> Unit,
+    ): Long = io {
+        if (Looper.getMainLooper()?.thread == Thread.currentThread()) {
+            throw IllegalStateException("下载请求误跑到主线程，应由 Dispatchers.IO 执行")
+        }
+        val req = headers().url(contentsUrl(rel))
+            .header("Accept", "application/vnd.github.raw")
+            .get().build()
+        val t0 = System.nanoTime()
+        client.newCall(req).execute().use { resp ->
+            val ms = (System.nanoTime() - t0) / 1_000_000L
+            DevLog.http("GET", safeUrl(req.url.encodedPath), resp.code, ms,
+                if (resp.isSuccessful) null else "download failed")
+            if (!resp.isSuccessful) error("下载失败 GitHub ${resp.code}")
+            val body = resp.body ?: error("下载响应为空")
+            val total = if (body.contentLength() > 0) body.contentLength() else totalHint
+            var done = 0L
+            body.byteStream().use { ins ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    if (isCancelled()) throw CancellationException("用户取消了下载")
+                    val n = ins.read(buf)
+                    if (n < 0) break
+                    sink.write(buf, 0, n)
+                    done += n
+                    onProgress(done, total)
+                }
+                sink.flush()
+            }
+            DevLog.i("DL", "流式下载 /$rel · $done 字节")
+            done
+        }
+    }
+
+    /** 某个文件夹下的全部文件（含多级子目录），供「下载整个文件夹」批量入队 */
+    suspend fun listAllUnder(rel: String): List<String> = io {
+        allPaths().filter { it.startsWith("$rel/") }
     }
 
     private fun deleteBySha(rel: String, sha: String, message: String) {

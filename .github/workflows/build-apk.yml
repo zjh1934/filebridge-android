@@ -17,9 +17,9 @@ concurrency:
 
 env:
   # ---- 版本规则：每出一个包只改这里，APK 名 / tag / 标题全部跟着走 ----
-  APP_VERSION: "1.7"
-  APK_NAME: "FileBridge-v1.7.apk"
-  RELEASE_TAG: "v1.7"
+  APP_VERSION: "1.8"
+  APK_NAME: "FileBridge-v1.8.apk"
+  RELEASE_TAG: "v1.8"
 
 jobs:
   build:

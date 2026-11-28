@@ -8,9 +8,9 @@
 
 - 代码仓（公开）：https://github.com/zjh1934/filebridge-android
 - 数据镜像仓（**私有**）：https://github.com/zjh1934/filebridge-persistent
-- 最新安装包：https://github.com/zjh1934/filebridge-android/releases/tag/v1.7
+- 最新安装包：https://github.com/zjh1934/filebridge-android/releases/tag/v1.8
 - 签名固定：v1.1 起同一张证书，后续版本直接覆盖安装
-- 版本规则：`FileBridge-v1.7.apk` → v1.8 → v1.9 …
+- 版本规则：`FileBridge-v1.8.apk` → v1.9 → v2.0 …
 
 ---
 
@@ -25,7 +25,7 @@
 `lovers`（糖糖）、`听本`、`林晚`、`filebridge`、`_r198_patch.py` 全在，目录结构一一对应。
 
 之前 v1.2～v1.4 只在代码仓里开了个 `sandbox-files/` 小目录塞 5 个文档，方向错了。
-v1.5 改成整个持久区全量镜像并独立仓库；v1.6 补齐云盘式交互；v1.7 内嵌 MD 编辑器 + 文件/文件夹重命名。
+v1.5 改成整个持久区全量镜像并独立仓库；v1.6 补齐云盘式交互；v1.7 内嵌 MD 编辑器 + 文件/文件夹重命名；v1.8 下载到系统 Download + 下载管理页。
 
 ---
 
@@ -108,6 +108,33 @@ Davio / Material Files / Voyager 的文件管理交互，以及 Material 3 关�
 
 **同步闭环**：三向比较会把它识别成「删旧 + 加新」，旧路径本地删除、新路径回灌创建。已用临时目录实测：镜像仓改名 → `sync` → 沙盒出现新目录 → 清理 → `verify` 字节一致。
 
+### 3.3 v1.8：下载到系统 Download + 下载管理页
+
+**落盘位置**：系统公共 `Download` 目录下新建「**沙盒管理器**」文件夹，系统自带「文件 / 下载」里直接可见，不是 APP 私有目录。
+
+```
+Download/沙盒管理器/
+├── <单文件名>                    ← 单文件
+└── <文件夹名>/<内部子目录>/...    ← 下载整个文件夹时保留结构
+```
+
+| 系统 | 实现 | 权限 |
+| --- | --- | --- |
+| Android 10+ | `DownloadCenter.kt` 走 `MediaStore.Downloads` + `RELATIVE_PATH`，写完 `IS_PENDING=0` | **零权限**，分区存储合规 |
+| Android 9 及以下 | 公共目录 File + `FileProvider` 授权打开 | `WRITE_EXTERNAL_STORAGE`，`maxSdkVersion=28` |
+
+**下载管理页**（`DownloadSheet.kt`，借鉴 Davio / 云盘传输中心）：顶部工具栏「下载管理」进入，带进行中角标；进度条 + 百分比 + 字节数、2 路并发队列、状态筛选（全部/进行中/已完成/失败）、统计计数、单个取消/重试/打开/移除、批量「重试全部失败 / 全部取消 / 清空已结束记录」。清空只清记录不删已下载文件。任务记录持久化在 `filesDir/downloads.json`，APP 被杀后恢复，中断任务标成可重试。
+
+**三个入口**：文件 ⋯ →「下载到手机」；文件夹 ⋯ →「下载整个文件夹」（一次读整棵树递归入队、保留子目录、避免同名图覆盖）；多选底栏 →「下载」。
+
+实现要点（都在 `DownloadCenter.kt` / `GitHubStore.downloadToSink()`）：
+
+- `Accept: application/vnd.github.raw` 让 Contents API 直接返回原始字节，**64 KB 缓冲流式写**，不把整个文件读进内存；不走 `call()`（它会把 body 读成 String，二进制会坏）
+- 进度每 256 KB 才刷新一次界面，状态变化才落盘，避免 20 MB 文件触发几百次重组
+- OkHttp 同步读循环不是协程挂起点，`job.cancel()` 不会自动抛异常 → 维护 `cancelledIds`，每块查一次；取消后删掉 `IS_PENDING` 的半截文件
+- `pump()` 取到任务先改状态为 RUNNING 再启动，避免重复认领
+- mime 对 `md/txt/json/py/html` 兜底；读超时 45s → 180s
+
 ### 应用名与 Logo
 
 - 名字改成**「沙盒管理器」**（`strings.xml` 的 `app_name`）
@@ -175,7 +202,7 @@ python3 scripts/sync_persistent.py sync 听本        # 只同步某个项目
 
 ## 5. 维护分工（我这边要承担的）
 
-1. **APP**：交互、功能、UI（含内嵌 MD 编辑器）、打包、固定签名、版本递增、Release 发布。
+1. **APP**：交互、功能、UI（内嵌 MD 编辑器 / 下载中心）、打包、固定签名、版本递增、Release 发布。
 2. **同步**：每次对话我改完持久区里的文件会主动跑一次 `sync`；你说「同步持久区」我立刻跑；
    需要更接近实时就用定时任务到点跑。
 3. **校验**：定期跑 `verify`，把「两边是否字节一致」用报告说清楚，不靠嘴说。
@@ -223,7 +250,9 @@ filebridge/                          ← 代码仓（公开）
 │   ├── res/mipmap-*/                 # ★ 5 密度 Logo + adaptive icon
 │   ├── res/values/strings.xml        # 应用名「沙盒管理器」
 │   └── java/com/example/filebridge/
-│       ├── GitHubStore.kt            # Contents API（含 allPaths / deleteFolder）
+│       ├── GitHubStore.kt            # Contents API（含 allPaths / deleteFolder / downloadToSink）
+│       ├── DownloadCenter.kt         # ★ 下载队列 + MediaStore 写入
+│       ├── DownloadSheet.kt          # ★ 下载管理页
 │       ├── Models.kt / Theme.kt / DevLog.kt / MainActivity.kt
 ├── VERIFY.md / VERIFY_STATIC.md
 └── README.md

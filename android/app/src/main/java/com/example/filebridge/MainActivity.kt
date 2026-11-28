@@ -1,10 +1,13 @@
 package com.example.filebridge
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
@@ -14,6 +17,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -25,6 +29,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -419,9 +424,40 @@ fun App() {
     var mdItem by remember { mutableStateOf<FileItem?>(null) }
     var mdText by remember { mutableStateOf("") }
     var renameBusy by remember { mutableStateOf(false) }
+    // v1.8 下载中心
+    var dlOpen by remember { mutableStateOf(false) }
+    var pendingDl by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     val gh = remember(token) { GitHubStore(ctx, GH_OWNER, GH_REPO, token, GH_ROOT) }
     val scope = rememberCoroutineScope()
+
+    // Android 9 及以下写公共 Download 需要 WRITE_EXTERNAL_STORAGE（maxSdk 28）
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) pendingDl?.invoke()
+        else Toast.makeText(ctx, "没给存储权限，下载会失败", Toast.LENGTH_SHORT).show()
+        pendingDl = null
+    }
+
+    fun ensureDownload(action: () -> Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            action()
+        } else if (ctx.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            == PackageManager.PERMISSION_GRANTED) {
+            action()
+        } else {
+            pendingDl = action
+            permLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
+    /** 下载中心持有当前 GitHubStore；token 变化时会重新赋值 */
+    LaunchedEffect(token) { DownloadCenter.currentStore = gh }
+    LaunchedEffect(Unit) {
+        DownloadCenter.init(ctx)
+        DevLog.i("DL", "下载中心就绪 · 目标目录 Download/${DownloadCenter.FOLDER}/")
+    }
 
     // 内嵌 MD 编辑器是全屏独立页：放在最前面，主界面的返回键与弹窗都不会干扰它
     mdItem?.let { f ->
@@ -469,6 +505,7 @@ fun App() {
     // 之前完全没有处理，系统返回键会直接杀掉 Activity —— 这是 v1.5 最明显的半成品感。
     BackHandler(enabled = true) {
         when {
+            dlOpen -> dlOpen = false
             selectMode -> { selectMode = false; selected = emptySet() }
             searchOpen -> { searchOpen = false; query = "" }
             globalOpen -> globalOpen = false
@@ -483,7 +520,7 @@ fun App() {
 
     LaunchedEffect(Unit) {
         DevLog.init(ctx)
-        DevLog.i("APP", "界面启动 · 沙盒管理器 v1.6 · 云盘式交互 / 返回键逐级回退 / 改动即时提交仓库")
+        DevLog.i("APP", "界面启动 · 沙盒管理器 v1.8 · 内嵌 MD 编辑器 / 下载中心 / 改动即时提交仓库")
     }
     DisposableEffect(Unit) {
         onDispose { DevLog.i("APP", "界面退到后台") }
@@ -546,6 +583,8 @@ fun App() {
         scope.launch { refresh() }
     }
 
+    val dlTasks by DownloadCenter.tasks.collectAsState()
+
     val segments = parent.split("/").filter { it.isNotEmpty() }
 
     fun toggleSel(rel: String) {
@@ -604,6 +643,20 @@ fun App() {
                             selected = if (selected.size == allShown.size) emptySet()
                                        else allShown.map { it.rel }.toSet()
                         }) { Text("全选") }
+                        TextButton(onClick = {
+                            val picked = allShown.filter { it.rel in selected }
+                            ensureDownload {
+                                var n = 0
+                                for (it in picked) {
+                                    if (it.type == "dir") continue
+                                    DownloadCenter.enqueue(it.rel, sizeHint = it.size)
+                                    n++
+                                }
+                                Toast.makeText(ctx, "$n 个文件已加入下载队列", Toast.LENGTH_SHORT).show()
+                            }
+                            selectMode = false
+                            selected = emptySet()
+                        }) { Text("下载") }
                         if (selected.size == 1) {
                             TextButton(onClick = {
                                 val t = allShown.firstOrNull { it.rel == selected.first() }
@@ -827,6 +880,18 @@ fun App() {
                                 containerColor = if (selectMode) FB.AccentSoft else FB.Surface),
                         )
                         AssistChip(
+                            onClick = { dlOpen = true },
+                            label = {
+                                val active = dlTasks.count { it.status == DownloadCenter.Status.RUNNING ||
+                                    it.status == DownloadCenter.Status.QUEUED }
+                                Text(if (active > 0) "下载管理 · $active" else "下载管理")
+                            },
+                            shape = FB.ShapePill,
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = if (dlTasks.any {
+                                    it.status == DownloadCenter.Status.RUNNING }) FB.AccentSoft else FB.Surface),
+                        )
+                        AssistChip(
                             onClick = {
                                 globalOpen = true
                                 scope.launch {
@@ -983,6 +1048,11 @@ fun App() {
         }
     }
 
+    // ------------------------------------------------------------ v1.8 下载管理页面
+    if (dlOpen) {
+        DownloadSheet(onDismiss = { dlOpen = false })
+    }
+
     // ------------------------------------------------------------ v1.6 新增交互
     if (confirmExit) {
         AlertDialog(
@@ -1025,6 +1095,23 @@ fun App() {
                 ActionRow("进入", "查看这个目录里的内容") {
                     folderAction = null
                     parent = joinPath(parent, d.name)
+                }
+                ActionRow("下载整个文件夹", "递归下载里面所有文件，保留子目录结构") {
+                    folderAction = null
+                    scope.launch {
+                        try {
+                            busy = true
+                            val paths = gh.listAllUnder(d.rel)
+                            ensureDownload {
+                                val n = DownloadCenter.enqueueFolder(d.rel, paths)
+                                Toast.makeText(ctx, "「${d.name}」$n 个文件已加入下载队列",
+                                    Toast.LENGTH_SHORT).show()
+                                dlOpen = true
+                            }
+                        } catch (e: Exception) {
+                            reportError("读取目录失败：${msgOf(e)}")
+                        } finally { busy = false }
+                    }
                 }
                 ActionRow("重命名文件夹", "整目录一次改名，单次 commit，不重传内容") {
                     folderAction = null
@@ -1185,6 +1272,15 @@ fun App() {
                 Text(text = "${fmtSize(f.size)} · ${shortType(f.name)}",
                     style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
+                ActionRow("下载到手机", "存到系统下载 / 沙盒管理器/，下载管理页可看进度") {
+                    actionItem = null
+                    ensureDownload {
+                        DownloadCenter.enqueue(f.rel, sizeHint = f.size)
+                        Toast.makeText(ctx, "已加入下载队列：Download/${DownloadCenter.FOLDER}/${f.name}",
+                            Toast.LENGTH_SHORT).show()
+                        dlOpen = true
+                    }
+                }
                 ActionRow("内嵌编辑器打开", "Markdown 高亮 / 预览 / 工具栏 / 查找替换 / 自动存草稿") {
                     actionItem = null
                     scope.launch {

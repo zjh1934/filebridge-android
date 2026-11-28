@@ -4,4 +4,6 @@
     <files-path name="exports" path="exports/" />
     <files-path name="devlog" path="devlog/" />
     <cache-path name="cache" path="." />
+    <!-- Android 9 及以下：公共 Download/沙盒管理器/ 下的文件经 FileProvider 授权给外部应用打开 -->
+    <external-path name="public_downloads" path="Download/" />
 </paths>

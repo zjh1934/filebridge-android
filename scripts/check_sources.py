@@ -48,6 +48,8 @@ REQUIRED = [
     "android/app/src/main/java/com/example/filebridge/DevLog.kt",
     "android/app/src/main/java/com/example/filebridge/MainActivity.kt",
     "android/app/src/main/java/com/example/filebridge/MdEditor.kt",
+    "android/app/src/main/java/com/example/filebridge/DownloadCenter.kt",
+    "android/app/src/main/java/com/example/filebridge/DownloadSheet.kt",
 ]
 
 REMOVED = [
@@ -151,6 +153,9 @@ def t_two_repos():
     assert "suspend fun renameAny(" in g, "缺少统一重命名入口"
     assert "/git/trees" in g and "JSONObject.NULL" in g, "目录重命名未走 Git Tree API"
     assert "/git/refs/heads/$branch" in g, "更新 ref 必须用复数 /git/refs/heads/"
+    assert "suspend fun downloadToSink(" in g, "缺少流式下载"
+    assert "application/vnd.github.raw" in g, "下载必须让 API 返回原始字节"
+    assert "suspend fun listAllUnder(" in g, "缺少整目录文件清单"
     assert '"isDir", true' in g, "目录删除未打包成一条回收站记录"
     d = (ROOT / "android/app/src/main/java/com/example/filebridge/DevLog.kt").read_text("utf-8")
     assert 'GH_MIRROR_REPO = "filebridge-persistent"' in d, "日志未标注镜像仓"
@@ -336,6 +341,43 @@ def t_rename_ui():
     return "文件/文件夹重命名入口齐备，目录改名走单次 commit 且联动当前路径"
 
 
+def t_download_center():
+    """下载中心：落到系统 Download/沙盒管理器、MediaStore 分区存储、队列与取消。"""
+    d = (ROOT / "android/app/src/main/java/com/example/filebridge/DownloadCenter.kt").read_text("utf-8")
+    for kw in ["object DownloadCenter", 'const val FOLDER = "沙盒管理器"',
+               "MediaStore.Downloads.EXTERNAL_CONTENT_URI", "RELATIVE_PATH", "IS_PENDING",
+               "Environment.DIRECTORY_DOWNLOADS", "Build.VERSION_CODES.Q",
+               "FileProvider.getUriForFile", "downloadToSink(", "cancelledIds",
+               "MAX_CONCURRENT = 2", "enqueueFolder(", "retryAllFailed()", "cancelAll()",
+               "clearFinished()", "fun open(", "persistNow = false", "256 * 1024",
+               "STATE_FILE", "DevLog.i(\"DL\""]:
+        assert kw in d, f"DownloadCenter.kt 缺少 {kw}"
+    mf = (ROOT / "android/app/src/main/AndroidManifest.xml").read_text("utf-8")
+    assert 'android:name="android.permission.WRITE_EXTERNAL_STORAGE"' in mf
+    assert 'android:maxSdkVersion="28"' in mf, "存储权限必须限制在 Android 9 及以下"
+    fp = (ROOT / "android/app/src/main/res/xml/file_paths.xml").read_text("utf-8")
+    assert 'name="public_downloads"' in fp and 'path="Download/"' in fp
+    return "系统 Download/沙盒管理器 + MediaStore(10+)/FileProvider(≤9) + 2 路队列/取消/重试/持久化"
+
+
+def t_download_ui():
+    """下载管理页面与三个入口都接上了。"""
+    m = (ROOT / "android/app/src/main/java/com/example/filebridge/MainActivity.kt").read_text("utf-8")
+    for kw in ["DownloadCenter.tasks.collectAsState()", "DownloadSheet(onDismiss",
+               "下载管理", "下载到手机", "下载整个文件夹", "ensureDownload(",
+               "gh.listAllUnder(d.rel)", "DownloadCenter.enqueueFolder(",
+               "DownloadCenter.enqueue(", "permLauncher.launch",
+               "DownloadCenter.currentStore = gh", "DownloadCenter.init(ctx)",
+               "dlOpen -> dlOpen = false", '}) { Text("下载") }']:
+        assert kw in m, f"MainActivity 缺少下载接入: {kw}"
+    sh = (ROOT / "android/app/src/main/java/com/example/filebridge/DownloadSheet.kt").read_text("utf-8")
+    for kw in ["fun DownloadSheet(", "LinearProgressIndicator(", "重试全部失败",
+               "全部取消", "清空已结束记录", "TaskCard(", "statusText(", "fmtBytes(",
+               "系统下载 / ${DownloadCenter.FOLDER}", "已结束记录"]:
+        assert kw in sh, f"DownloadSheet.kt 缺少 {kw}"
+    return "下载管理页（进度/筛选/重试/取消/打开/清空）+ 单文件/文件夹/多选三入口齐备"
+
+
 def t_fixed_signing():
     wf = (ROOT / ".github/workflows/build-apk.yml").read_text("utf-8")
     gradle = (ROOT / "android/app/build.gradle.kts").read_text("utf-8")
@@ -343,7 +385,7 @@ def t_fixed_signing():
                "assembleRelease", "verify --verbose", "--print-certs"]:
         assert kw in wf
     for kw in ['create("fixed")', 'file("filebridge.jks")', "enableV2Signing = true",
-               'versionName = "1.7"', "versionCode = 8",
+               'versionName = "1.8"', "versionCode = 9",
                "isMinifyEnabled = true", "isShrinkResources = true"]:
         assert kw in gradle, f"build.gradle.kts 缺少 {kw}"
     assert not (ROOT / "android/app/filebridge.jks").exists()
@@ -354,13 +396,14 @@ def t_fixed_signing():
 def t_version_rule():
     wf = (ROOT / ".github/workflows/build-apk.yml").read_text("utf-8")
     body = (ROOT / ".github/RELEASE_BODY.md").read_text("utf-8")
-    for kw in ['APP_VERSION: "1.7"', 'APK_NAME: "FileBridge-v1.7.apk"',
-               'RELEASE_TAG: "v1.7"', "Source self-check"]:
+    for kw in ['APP_VERSION: "1.8"', 'APK_NAME: "FileBridge-v1.8.apk"',
+               'RELEASE_TAG: "v1.8"', "Source self-check"]:
         assert kw in wf, f"workflow 缺少 {kw}"
-    for kw in ["FileBridge-v1.7.apk", "filebridge-persistent", "沙盒管理器",
-               "返回键", "verify", "直接覆盖", "Markor", "内嵌", "重命名文件夹"]:
+    for kw in ["FileBridge-v1.8.apk", "filebridge-persistent", "沙盒管理器",
+               "返回键", "verify", "直接覆盖", "Markor", "内嵌", "重命名文件夹",
+               "下载管理", "沙盒管理器/", "MediaStore"]:
         assert kw in body, f"RELEASE_BODY 缺少 {kw}"
-    return "v1.7 包名/tag/版本规则固定，可覆盖 v1.1～v1.6"
+    return "v1.8 包名/tag/版本规则固定，可覆盖 v1.1～v1.7"
 
 
 def t_workflow():
@@ -384,9 +427,10 @@ def t_readme():
     for kw in ["沙盒管理器", "跨对话持久区", "zjh1934/filebridge-persistent",
                "私有", "两个仓库", "sync_persistent.py", "v1.6", "三向比较",
                "verify", "返回键", "云盘", "糖糖", "听本", "隐私边界", "固定签名",
-               "Markor", "MdEditor.kt", "重命名文件夹", "查找替换", "GPL-3.0"]:
+               "Markor", "MdEditor.kt", "重命名文件夹", "查找替换", "GPL-3.0",
+               "DownloadCenter.kt", "下载管理", "MediaStore", "沙盒管理器/"]:
         assert kw in s, f"README 缺少 {kw}"
-    return "README 已同步 v1.7：内嵌编辑器出处、目录重命名设计、维护方式与边界"
+    return "README 已同步 v1.8：下载中心、内嵌编辑器出处、目录重命名设计、维护边界"
 
 
 def main():
@@ -394,7 +438,8 @@ def main():
         ("必需文件与旧残留", t_required), ("无凭据/私钥泄露", t_no_secrets),
         ("两仓分离与镜像根", t_two_repos), ("全量双向同步脚本", t_persistent_sync),
         ("v1.6 云盘式交互", t_v16_ui), ("v1.7 内嵌 MD 编辑器", t_md_editor),
-        ("v1.7 重命名", t_rename_ui), ("应用名与 Logo", t_branding),
+        ("v1.7 重命名", t_rename_ui), ("v1.8 下载中心", t_download_center),
+        ("v1.8 下载管理页", t_download_ui), ("应用名与 Logo", t_branding),
         ("默认持久区镜像", t_sandbox_default), ("UI 设计系统", t_ui_design),
         ("GitHub 中继后端", t_gh_backend), ("核心功能未改坏", t_features_intact),
         ("网络线程安全", t_thread_safety), ("日志准确性", t_log_accuracy),
